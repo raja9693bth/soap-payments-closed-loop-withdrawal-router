@@ -1,0 +1,19 @@
+# ActiveRecord database config.
+# We default to a local Postgres named `soap_test`, owned by your shell user.
+# The harness and grader both honor DATABASE_URL when set.
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  pool: 10
+  host: <%= ENV.fetch('SOAP_DB_HOST', 'localhost') %>
+  port: <%= ENV.fetch('SOAP_DB_PORT', '5432') %>
+  username: <%= ENV.fetch('SOAP_DB_USER', ENV['USER']) %>
+  password: <%= ENV['SOAP_DB_PASSWORD'] %>
+
+development:
+  <<: *default
+  database: soap_dev
+
+test:
+  <<: *default
+  database: <%= ENV.fetch('SOAP_DB_NAME', 'soap_test') %>
