@@ -104,6 +104,36 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
       expect(user.balance_cents).to eq(2_000)
     end
 
+    it 'guarantees idempotency safety during client retries with the same key' do
+      payload = {
+        user_id: user.id,
+        amount_cents: 3_000,
+        default_payout_method_id: bank_pm.id,
+        idempotency_key: 'idem_retry_safe_test_key'
+      }
+
+      # First attempt (initial client request)
+      post '/api/withdrawals', payload.to_json, { 'CONTENT_TYPE' => 'application/json' }
+      expect(last_response.status).to eq(201)
+      first_json = JSON.parse(last_response.body)
+      withdrawal_id = first_json['withdrawal_id']
+
+      user.reload
+      expect(user.balance_cents).to eq(7_000)
+      initial_ledger_count = LedgerEntry.where(user: user).count
+
+      # Second attempt (simulating client retry with identical body and idempotency key)
+      post '/api/withdrawals', payload.to_json, { 'CONTENT_TYPE' => 'application/json' }
+      expect(last_response.status).to eq(201)
+      second_json = JSON.parse(last_response.body)
+      expect(second_json['withdrawal_id']).to eq(withdrawal_id)
+
+      # Invariant: NO duplicate balance deduction and NO duplicate ledger entry
+      user.reload
+      expect(user.balance_cents).to eq(7_000)
+      expect(LedgerEntry.where(user: user).count).to eq(initial_ledger_count)
+    end
+
     it 'returns 409 conflict when idempotency key reused with different payload' do
       payload1 = {
         user_id: user.id,

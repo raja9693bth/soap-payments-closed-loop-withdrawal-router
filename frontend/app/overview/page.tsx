@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { StatCard } from '@/components/StatCard';
 import { StatusBadge } from '@/components/StatusBadge';
-import { api, formatCurrency, formatDateTime, SoapApiError } from '@/lib/api';
+import { api, formatCurrency, formatDateTime, SoapApiError, ConnectionStateEvent } from '@/lib/api';
 import { DashboardMetrics } from '@/types';
 
 export default function OverviewPage() {
@@ -29,6 +29,13 @@ export default function OverviewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ message: string; resolution?: string } | null>(null);
   const [dateRange, setDateRange] = useState('7d');
+  const [connState, setConnState] = useState<ConnectionStateEvent>(() => api.getConnectionState());
+
+  useEffect(() => {
+    return api.subscribe((event) => {
+      setConnState(event);
+    });
+  }, []);
 
   const fetchMetrics = useCallback(async () => {
     try {
@@ -140,13 +147,26 @@ export default function OverviewPage() {
         </div>
       </div>
 
+      {/* Progressive Wake-up Banner during Cold Start */}
+      {loading && connState.state === 'waking' && (
+        <div className="p-4 bg-amber-50 border border-amber-300/80 rounded-xl text-xs text-amber-950 space-y-1.5 shadow-2xs">
+          <div className="flex items-center gap-2 font-bold text-amber-900">
+            <RefreshCw className="w-4 h-4 text-amber-600 animate-spin shrink-0" />
+            <span>Waking Sandbox Service…</span>
+          </div>
+          <p className="text-slate-700 leading-relaxed">
+            The free-tier Render backend container is spinning up from inactivity. This typically takes 30–50 seconds on cold start. Data will populate automatically once the service is live.
+          </p>
+        </div>
+      )}
+
       {/* Backend Disconnection / Outage Banner */}
       {error && (
         <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 font-bold text-rose-800">
               <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>Backend Outage / Connection Failure</span>
+              <span>Backend Unavailable</span>
             </div>
             <button
               onClick={handleRefresh}

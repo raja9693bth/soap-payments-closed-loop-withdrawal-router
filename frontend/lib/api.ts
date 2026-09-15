@@ -64,8 +64,29 @@ function resolveApiBaseUrl(): string {
 
 const API_BASE_URL = resolveApiBaseUrl();
 
+export type BackendConnectionState = 'connected' | 'connecting' | 'waking' | 'unavailable';
+
+export interface ConnectionStateEvent {
+  state: BackendConnectionState;
+  message: string;
+  attempt: number;
+  maxAttempts: number;
+  elapsedMs: number;
+}
+
+type StateListener = (event: ConnectionStateEvent) => void;
+
 class ApiClient {
   private baseUrl: string;
+  private listeners: Set<StateListener> = new Set();
+  private currentState: BackendConnectionState = 'connected';
+  private currentEvent: ConnectionStateEvent = {
+    state: 'connected',
+    message: 'Connected to backend',
+    attempt: 1,
+    maxAttempts: 2,
+    elapsedMs: 0,
+  };
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
@@ -73,6 +94,30 @@ class ApiClient {
 
   getBaseUrl(): string {
     return this.baseUrl;
+  }
+
+  subscribe(listener: StateListener): () => void {
+    this.listeners.add(listener);
+    listener(this.currentEvent);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private notify(state: BackendConnectionState, message: string, attempt = 1, maxAttempts = 2, elapsedMs = 0) {
+    this.currentState = state;
+    this.currentEvent = { state, message, attempt, maxAttempts, elapsedMs };
+    this.listeners.forEach((l) => {
+      try {
+        l(this.currentEvent);
+      } catch (e) {
+        console.error('State listener error:', e);
+      }
+    });
+  }
+
+  getConnectionState(): ConnectionStateEvent {
+    return this.currentEvent;
   }
 
   private mapDomainError(code: string, rawMessage: string, status: number): ApiErrorDetail {
@@ -145,67 +190,135 @@ class ApiClient {
     const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
     const url = this.baseUrl ? `${this.baseUrl}${cleanEndpoint}` : cleanEndpoint;
 
-    const headers = {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      ...options.headers,
-    };
+    const method = (options.method || 'GET').toUpperCase();
+    // Allow retries for GET/HEAD, or POST /api/withdrawals which has database-backed idempotency protection
+    const isIdempotent = method === 'GET' || method === 'HEAD' || endpoint.includes('/api/withdrawals');
+    const maxAttempts = isIdempotent ? 2 : 1;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    let lastError: unknown = null;
+    const requestStartTime = Date.now();
 
-    try {
-      const response = await fetch(url, {
-        ...options,
-        headers,
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      const contentType = response.headers.get('content-type') || '';
-      const isJson = contentType.includes('application/json');
-      const data = isJson ? await response.json() : await response.text();
-
-      if (!response.ok) {
-        const errorObj = typeof data === 'object' && data !== null && 'error' in data ? (data as { error: { code?: string; message?: string } }).error : null;
-        const code = errorObj?.code || `http_${response.status}`;
-        const message = errorObj?.message || (typeof data === 'string' ? data : `HTTP ${response.status} error`);
-        throw new SoapApiError(this.mapDomainError(code, message, response.status));
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const elapsed = Date.now() - requestStartTime;
+      if (attempt === 1) {
+        this.notify('connecting', 'Connecting to sandbox backend…', attempt, maxAttempts, elapsed);
+      } else {
+        this.notify('waking', 'Waking sandbox service… (Render free tier cold start)', attempt, maxAttempts, elapsed);
       }
 
-      return data as T;
-    } catch (err: unknown) {
-      clearTimeout(timeoutId);
+      // If waiting longer than 4.5s on attempt 1, proactively transition to "waking"
+      const wakingTimer = setTimeout(() => {
+        if (this.currentState === 'connecting') {
+          this.notify('waking', 'Waking sandbox service… (Render free tier cold start)', attempt, maxAttempts, Date.now() - requestStartTime);
+        }
+      }, 4500);
 
-      if (err instanceof SoapApiError) {
-        throw err;
+      const controller = new AbortController();
+      // Generous 45s timeout to accommodate Render cold boot
+      const timeoutMs = 45000;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      // Support external signal cancellation
+      let abortListener: (() => void) | null = null;
+      if (options.signal) {
+        abortListener = () => controller.abort();
+        options.signal.addEventListener('abort', abortListener);
       }
 
-      if ((err as Error).name === 'AbortError') {
-        throw new SoapApiError({
-          code: 'request_timeout',
-          status: 504,
-          message: 'The request to the SOAP Payments backend timed out after 12 seconds.',
-          resolution: 'Check backend service health or retry the request.',
+      try {
+        const headers = {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...options.headers,
+        };
+
+        const response = await fetch(url, {
+          ...options,
+          headers,
+          cache: 'no-store',
+          signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
+        clearTimeout(wakingTimer);
+        if (options.signal && abortListener) {
+          options.signal.removeEventListener('abort', abortListener);
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        const isJson = contentType.includes('application/json');
+        const data = isJson ? await response.json() : await response.text();
+
+        if (!response.ok) {
+          // If server returned 502/503/504 Bad Gateway / Service Unavailable during boot, retry once if idempotent
+          if ([502, 503, 504].includes(response.status) && attempt < maxAttempts) {
+            this.notify('waking', 'Waking sandbox service… (Retrying connection)', attempt, maxAttempts, Date.now() - requestStartTime);
+            await new Promise((r) => setTimeout(r, 2500));
+            continue;
+          }
+
+          const errorObj = typeof data === 'object' && data !== null && 'error' in data ? (data as { error: { code?: string; message?: string } }).error : null;
+          const code = errorObj?.code || `http_${response.status}`;
+          const message = errorObj?.message || (typeof data === 'string' ? data : `HTTP ${response.status} error`);
+          throw new SoapApiError(this.mapDomainError(code, message, response.status));
+        }
+
+        this.notify('connected', 'Connected', attempt, maxAttempts, Date.now() - requestStartTime);
+        return data as T;
+      } catch (err: unknown) {
+        clearTimeout(timeoutId);
+        clearTimeout(wakingTimer);
+        if (options.signal && abortListener) {
+          options.signal.removeEventListener('abort', abortListener);
+        }
+
+        // If caller explicitly aborted via external signal, do not retry
+        if (options.signal?.aborted) {
+          throw err;
+        }
+
+        // Domain errors from backend (e.g. 409 conflict, 422 insufficient funds) are non-retryable
+        if (err instanceof SoapApiError) {
+          throw err;
+        }
+
+        lastError = err;
+
+        // If this was an AbortError or network failure (e.g. connection refused/reset during boot)
+        // and we have attempts remaining, backoff and retry
+        if (attempt < maxAttempts) {
+          this.notify('waking', 'Waking sandbox service… (Retrying after connection drop)', attempt, maxAttempts, Date.now() - requestStartTime);
+          await new Promise((r) => setTimeout(r, 2500));
+          continue;
+        }
       }
+    }
 
-      const isProd = typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
-      const targetHint = this.baseUrl || 'the API server';
+    // Retries exhausted
+    this.notify('unavailable', 'Backend unavailable', maxAttempts, maxAttempts, Date.now() - requestStartTime);
 
+    if (lastError && (lastError as Error).name === 'AbortError') {
       throw new SoapApiError({
-        code: 'connection_refused',
-        status: 503,
-        message: isProd
-          ? `Unable to connect to SOAP Payments backend at ${targetHint}. The service may be waking up or offline.`
-          : 'Unable to connect to SOAP Payments backend API. Please ensure the local Ruby API server is running on port 4567.',
-        resolution: isProd
-          ? 'Verify your Render API service is deployed and active, then click Retry.'
-          : 'Run: bundle exec puma -p 4567 config.ru',
+        code: 'request_timeout',
+        status: 504,
+        message: 'The request to the SOAP Payments backend timed out after 45 seconds.',
+        resolution: 'The free-tier Render service was booting from cold start. Click "Retry Connection" to reconnect.',
       });
     }
+
+    const isProd = typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
+    const targetHint = this.baseUrl || 'the API server';
+
+    throw new SoapApiError({
+      code: 'connection_refused',
+      status: 503,
+      message: isProd
+        ? `Unable to connect to SOAP Payments backend at ${targetHint}. The service may still be waking up or offline.`
+        : 'Unable to connect to SOAP Payments backend API. Please ensure the local Ruby API server is running on port 4567.',
+      resolution: isProd
+        ? 'Verify your Render API service is active, then click Retry.'
+        : 'Run: bundle exec puma -p 4567 config.ru',
+    });
   }
 
   async getHealth() {

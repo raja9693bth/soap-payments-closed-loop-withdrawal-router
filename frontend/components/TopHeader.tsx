@@ -1,8 +1,8 @@
 'use client';
-
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Search, Bell, Menu } from 'lucide-react';
+import { api, ConnectionStateEvent } from '@/lib/api';
 
 interface TopHeaderProps {
   onOpenCommandPalette: () => void;
@@ -14,6 +14,13 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   onOpenMobileNav,
 }) => {
   const router = useRouter();
+  const [connState, setConnState] = useState<ConnectionStateEvent>(() => api.getConnectionState());
+
+  useEffect(() => {
+    return api.subscribe((event) => {
+      setConnState(event);
+    });
+  }, []);
 
   return (
     <header className="h-14 bg-white border-b border-slate-200/80 sticky top-0 z-20 px-3 sm:px-6 flex items-center justify-between shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
@@ -53,12 +60,35 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
 
       {/* Header Right Actions */}
       <div className="flex items-center gap-2 sm:gap-4">
-        {/* Environment Badge (responsive text) */}
-        <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200 whitespace-nowrap">
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-          <span className="hidden sm:inline">Sandbox Mode</span>
-          <span className="sm:hidden">Sandbox</span>
-        </div>
+        {/* Dynamic Sandbox Connection & Wake-up Badge */}
+        {connState.state === 'waking' && (
+          <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-amber-50 text-amber-800 border border-amber-300 whitespace-nowrap shadow-2xs">
+            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+            <span className="hidden sm:inline">Waking Sandbox…</span>
+            <span className="sm:hidden">Waking…</span>
+          </div>
+        )}
+        {connState.state === 'connecting' && (
+          <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
+            <span className="hidden sm:inline">Connecting…</span>
+            <span className="sm:hidden">Connecting</span>
+          </div>
+        )}
+        {connState.state === 'connected' && (
+          <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-emerald-50 text-emerald-800 border border-emerald-200 whitespace-nowrap">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+            <span className="hidden sm:inline">Sandbox Connected</span>
+            <span className="sm:hidden">Sandbox</span>
+          </div>
+        )}
+        {connState.state === 'unavailable' && (
+          <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200 whitespace-nowrap">
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />
+            <span className="hidden sm:inline">Sandbox Offline</span>
+            <span className="sm:hidden">Offline</span>
+          </div>
+        )}
 
         {/* Notifications Icon */}
         <button
