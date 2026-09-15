@@ -11,6 +11,8 @@ interface StatCardProps {
   };
   secondaryContext?: string;
   badge?: string;
+  badgeVariant?: 'success' | 'warning' | 'error' | 'neutral';
+  isLoading?: boolean;
 }
 
 export const StatCard: React.FC<StatCardProps> = ({
@@ -20,7 +22,16 @@ export const StatCard: React.FC<StatCardProps> = ({
   trend,
   secondaryContext,
   badge,
+  badgeVariant = 'neutral',
+  isLoading = false,
 }) => {
+  const badgeStyles = {
+    success: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    warning: 'bg-amber-50 text-amber-700 border-amber-200',
+    error: 'bg-rose-50 text-rose-700 border-rose-200',
+    neutral: 'bg-slate-100 text-slate-700 border-slate-200',
+  };
+
   return (
     <div className="bg-white rounded-xl p-5 border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.05)] hover:border-slate-300 transition-colors">
       <div className="flex items-center justify-between">
@@ -31,12 +42,16 @@ export const StatCard: React.FC<StatCardProps> = ({
       </div>
 
       <div className="mt-3">
-        <div className="text-2xl font-bold tracking-tight text-slate-900 tabular-nums">
-          {value}
-        </div>
+        {isLoading ? (
+          <div className="h-8 w-24 bg-slate-100 animate-pulse rounded my-1" />
+        ) : (
+          <div className="text-2xl font-bold tracking-tight text-slate-900 tabular-nums">
+            {value}
+          </div>
+        )}
 
-        <div className="mt-2.5 flex items-center gap-2 text-xs">
-          {trend && (
+        <div className="mt-2.5 flex items-center gap-2 text-xs flex-wrap">
+          {trend && !isLoading && (
             <span
               className={`inline-flex items-center font-semibold ${
                 trend.positive === true
@@ -54,7 +69,7 @@ export const StatCard: React.FC<StatCardProps> = ({
           )}
 
           {badge && (
-            <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+            <span className={`px-2 py-0.5 rounded text-[11px] font-medium border ${badgeStyles[badgeVariant]}`}>
               {badge}
             </span>
           )}

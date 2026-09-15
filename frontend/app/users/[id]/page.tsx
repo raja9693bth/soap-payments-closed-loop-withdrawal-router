@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import {
@@ -33,27 +33,59 @@ export default function UserProfilePage() {
     };
   } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchUser = useCallback(async () => {
+    try {
+      const res = await api.getUser(id);
+      setData(res);
+      setError(null);
+    } catch (err: unknown) {
+      setError((err as Error).message || 'Failed to load customer profile');
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
+
+  const handleRetry = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    fetchUser();
+  }, [fetchUser]);
 
   useEffect(() => {
-    let isMounted = true;
-    api.getUser(id)
-      .then((res) => {
-        if (isMounted) setData(res);
-      })
-      .catch((err) => console.error('Failed to load user', err))
-      .finally(() => {
-        if (isMounted) setLoading(false);
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, [id]);
+    fetchUser();
+  }, [fetchUser]);
 
   if (loading) {
     return (
       <div className="py-24 text-center text-slate-400 text-xs">
-        <Clock className="w-5 h-5 animate-spin mx-auto mb-2 text-slate-400" />
+        <Clock className="w-5 h-5 animate-spin mx-auto mb-2 text-blue-600" />
         Loading customer profile...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="py-24 text-center space-y-4 max-w-md mx-auto">
+        <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-3 text-left">
+          <div className="font-bold text-rose-800 flex items-center gap-2">
+            <span>Backend Connection Error</span>
+          </div>
+          <p className="text-slate-700">{error}</p>
+          <div className="flex items-center gap-3 pt-1">
+            <button
+              onClick={handleRetry}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-white border border-rose-300 text-rose-800 font-semibold hover:bg-rose-100/60 transition-colors cursor-pointer text-xs"
+            >
+              Retry
+            </button>
+            <Link href="/users" className="text-xs text-blue-600 hover:underline">
+              &larr; Back to Users
+            </Link>
+          </div>
+        </div>
       </div>
     );
   }
@@ -61,13 +93,14 @@ export default function UserProfilePage() {
   if (!data) {
     return (
       <div className="py-24 text-center space-y-3">
-        <p className="text-sm font-semibold text-slate-700">User not found</p>
+        <p className="text-sm font-semibold text-slate-700">User #{id} not found in database.</p>
         <Link href="/users" className="text-xs text-blue-600 hover:underline">
           &larr; Back to all users
         </Link>
       </div>
     );
   }
+
 
   const { user, payment_methods, deposits, withdrawals, ledger_summary } = data;
 

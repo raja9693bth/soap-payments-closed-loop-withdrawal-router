@@ -1,29 +1,37 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
-import { CreditCard, Landmark, Coins, ShieldCheck, RefreshCw, Lock } from 'lucide-react';
+import { CreditCard, Landmark, Coins, ShieldCheck, RefreshCw, Lock, AlertTriangle } from 'lucide-react';
 import { api, formatDateTime } from '@/lib/api';
 import { PaymentMethod } from '@/types';
 
 export default function PaymentInstrumentsPage() {
   const [instruments, setInstruments] = useState<PaymentMethod[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadInstruments = useCallback(async () => {
+    try {
+      const data = await api.getPaymentMethods();
+      setInstruments(data.payment_methods || []);
+      setError(null);
+    } catch (err: unknown) {
+      setError((err as Error).message || 'Failed to load payment instruments from backend');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    loadInstruments();
+  }, [loadInstruments]);
 
   useEffect(() => {
-    async function loadInstruments() {
-      try {
-        setLoading(true);
-        const data = await api.getPaymentMethods();
-        setInstruments(data.payment_methods);
-      } catch (err) {
-        console.error('Failed to load instruments', err);
-      } finally {
-        setLoading(false);
-      }
-    }
     loadInstruments();
-  }, []);
+  }, [loadInstruments]);
 
   const getIcon = (assetClass: string) => {
     switch (assetClass) {
@@ -52,10 +60,39 @@ export default function PaymentInstrumentsPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-medium">
-          <Lock className="w-3.5 h-3.5" /> PCI Safe: Tokens Strictly Masked
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+            title="Refresh Instruments"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-medium">
+            <Lock className="w-3.5 h-3.5" /> PCI Safe: Tokens Strictly Masked
+          </div>
         </div>
       </div>
+
+      {/* Error state */}
+      {error && (
+        <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-bold text-rose-800">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>Backend Error: Unable to load payment instruments</span>
+            </div>
+            <button
+              onClick={handleRefresh}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-white border border-rose-300 text-rose-800 font-semibold hover:bg-rose-100/60 transition-colors cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> Retry
+            </button>
+          </div>
+          <p className="text-slate-700">{error}</p>
+        </div>
+      )}
 
       {/* Instruments Table */}
       <div className="bg-white rounded-xl border border-slate-200/80 shadow-2xs overflow-hidden">
@@ -77,6 +114,18 @@ export default function PaymentInstrumentsPage() {
                   <td colSpan={6} className="py-12 text-center text-slate-400">
                     <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-slate-400" />
                     Loading payment instruments...
+                  </td>
+                </tr>
+              ) : error ? (
+                <tr>
+                  <td colSpan={6} className="py-12 text-center text-slate-400">
+                    Unable to display instruments due to backend connection failure.
+                  </td>
+                </tr>
+              ) : instruments.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="py-12 text-center text-slate-400">
+                    No payment instruments registered in the database.
                   </td>
                 </tr>
               ) : (

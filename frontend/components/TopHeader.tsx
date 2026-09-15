@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { useRouter } from 'next/navigation';
 import { Search, Bell } from 'lucide-react';
 
 interface TopHeaderProps {
@@ -8,6 +9,8 @@ interface TopHeaderProps {
 }
 
 export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenCommandPalette }) => {
+  const router = useRouter();
+
   return (
     <header className="h-14 bg-white border-b border-slate-200/80 sticky top-0 z-20 px-6 flex items-center justify-between shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
       {/* Search Bar Trigger */}
@@ -32,8 +35,10 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ onOpenCommandPalette }) =>
 
         {/* Notifications Icon */}
         <button
-          className="p-2 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 relative transition-colors"
-          title="Notifications"
+          onClick={() => router.push('/audit-logs')}
+          className="p-2 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 relative transition-colors cursor-pointer"
+          title="View Audit Logs & System Notifications"
+          aria-label="View Audit Logs & System Notifications"
         >
           <Bell className="w-4 h-4" />
           <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-blue-600 ring-2 ring-white" />

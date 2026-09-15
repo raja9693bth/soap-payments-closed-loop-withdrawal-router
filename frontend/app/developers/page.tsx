@@ -17,6 +17,8 @@ export default function DevelopersPage() {
   const [tryEndpoint, setTryEndpoint] = useState('/api/health');
   const [tryLoading, setTryLoading] = useState(false);
   const [tryResponse, setTryResponse] = useState<string | null>(null);
+  const [tryLatency, setTryLatency] = useState<number | null>(null);
+  const [tryStatus, setTryStatus] = useState<number | null>(null);
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -25,22 +27,34 @@ export default function DevelopersPage() {
   };
 
   const handleRunRequest = async () => {
+    const start = performance.now();
     try {
       setTryLoading(true);
+      setTryResponse(null);
+      setTryStatus(null);
+      setTryLatency(null);
+
       if (tryEndpoint === '/api/health') {
         const res = await api.getHealth();
         setTryResponse(JSON.stringify(res, null, 2));
+        setTryStatus(200);
       } else if (tryEndpoint === '/api/dashboard') {
         const res = await api.getDashboard();
         setTryResponse(JSON.stringify(res, null, 2));
+        setTryStatus(200);
       } else if (tryEndpoint === '/api/ledger') {
         const res = await api.getLedger();
         setTryResponse(JSON.stringify(res, null, 2));
+        setTryStatus(200);
       } else if (tryEndpoint === '/api/users') {
         const res = await api.getUsers();
         setTryResponse(JSON.stringify(res, null, 2));
+        setTryStatus(200);
       }
+      setTryLatency(Math.round(performance.now() - start));
     } catch (err: unknown) {
+      setTryLatency(Math.round(performance.now() - start));
+      setTryStatus(500);
       setTryResponse(JSON.stringify({ error: (err as Error).message }, null, 2));
     } finally {
       setTryLoading(false);
@@ -72,7 +86,7 @@ export default function DevelopersPage() {
             <h2 className="text-sm font-bold text-slate-900">Live API Test Console</h2>
           </div>
           <span className="text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-            Connected to Local Ruby Engine
+            Connected to Ruby Engine
           </span>
         </div>
 
@@ -81,16 +95,21 @@ export default function DevelopersPage() {
             <span className="px-3 py-2 bg-slate-100 border border-slate-300 rounded-l-lg font-mono text-xs font-bold text-slate-700">
               {tryMethod}
             </span>
-            <select
-              value={tryEndpoint}
-              onChange={(e) => setTryEndpoint(e.target.value)}
-              className="px-3 py-2 border-y border-r border-slate-300 rounded-r-lg bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full sm:w-64"
-            >
-              <option value="/api/health">/api/health</option>
-              <option value="/api/dashboard">/api/dashboard</option>
-              <option value="/api/ledger">/api/ledger</option>
-              <option value="/api/users">/api/users</option>
-            </select>
+            <div className="relative w-full sm:w-64">
+              <select
+                value={tryEndpoint}
+                onChange={(e) => setTryEndpoint(e.target.value)}
+                className="px-3 pr-8 py-2 border-y border-r border-slate-300 rounded-r-lg bg-white text-xs font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full appearance-none cursor-pointer"
+              >
+                <option value="/api/health">/api/health</option>
+                <option value="/api/dashboard">/api/dashboard</option>
+                <option value="/api/ledger">/api/ledger</option>
+                <option value="/api/users">/api/users</option>
+              </select>
+              <div className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">
+                <span className="text-[10px]">▼</span>
+              </div>
+            </div>
           </div>
 
           <button
@@ -103,14 +122,33 @@ export default function DevelopersPage() {
         </div>
 
         {tryResponse && (
-          <div className="space-y-1">
-            <span className="text-[10px] uppercase font-bold text-slate-400">Response Payload:</span>
+          <div className="space-y-2 pt-2 border-t border-slate-100">
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 rounded font-mono font-bold text-white text-[11px] ${tryStatus === 200 ? 'bg-emerald-600' : 'bg-rose-600'}`}>
+                  {tryStatus} {tryStatus === 200 ? 'OK' : 'ERROR'}
+                </span>
+                {tryLatency !== null && (
+                  <span className="text-slate-500 text-[11px] font-mono">
+                    Latency: <span className="font-semibold text-slate-800">{tryLatency}ms</span>
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={() => copyToClipboard(tryResponse, 'try_res')}
+                className="inline-flex items-center gap-1 text-[11px] text-slate-600 hover:text-slate-900 border border-slate-200 px-2 py-1 rounded bg-slate-50 cursor-pointer"
+              >
+                {copied === 'try_res' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                {copied === 'try_res' ? 'Copied' : 'Copy'}
+              </button>
+            </div>
             <pre className="p-4 bg-slate-900 text-emerald-400 font-mono text-xs rounded-lg overflow-x-auto max-h-60">
               {tryResponse}
             </pre>
           </div>
         )}
       </div>
+
 
       {/* Core API Reference Documentation */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

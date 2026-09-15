@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import {
   Search,
@@ -8,6 +8,8 @@ import {
   ArrowRight,
   RefreshCw,
   Plus,
+  AlertTriangle,
+  ChevronDown,
 } from 'lucide-react';
 import { api, formatCurrency, formatDateTime } from '@/lib/api';
 import { StatusBadge } from '@/components/StatusBadge';
@@ -16,40 +18,33 @@ import { Withdrawal } from '@/types';
 export default function WithdrawalsListPage() {
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
 
-  const fetchWithdrawals = async () => {
+  const fetchWithdrawals = useCallback(async () => {
     try {
-      setLoading(true);
       const data = await api.getWithdrawals({
         status: statusFilter || undefined,
       });
-      setWithdrawals(data.withdrawals);
-    } catch (err) {
-      console.error('Failed to load withdrawals', err);
+      setWithdrawals(data.withdrawals || []);
+      setError(null);
+    } catch (err: unknown) {
+      setError((err as Error).message || 'Failed to load withdrawals from backend');
     } finally {
       setLoading(false);
     }
-  };
+  }, [statusFilter]);
+
+  const handleRefresh = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    fetchWithdrawals();
+  }, [fetchWithdrawals]);
 
   useEffect(() => {
-    let isMounted = true;
-    api.getWithdrawals({
-      status: statusFilter || undefined,
-    })
-      .then((data) => {
-        if (!isMounted) return;
-        setWithdrawals(data.withdrawals);
-      })
-      .catch((err) => console.error('Failed to load withdrawals', err))
-      .finally(() => {
-        if (isMounted) setLoading(false);
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, [statusFilter]);
+    fetchWithdrawals();
+  }, [fetchWithdrawals]);
 
   const filteredWithdrawals = withdrawals.filter((w) => {
     const term = search.toLowerCase();
@@ -57,6 +52,11 @@ export default function WithdrawalsListPage() {
     const userMatch = w.user_email?.toLowerCase().includes(term);
     return idMatch || userMatch;
   });
+
+  const handleResetFilters = () => {
+    setSearch('');
+    setStatusFilter('');
+  };
 
   return (
     <div className="space-y-8 pb-12">
@@ -76,8 +76,9 @@ export default function WithdrawalsListPage() {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={fetchWithdrawals}
-            className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold shadow-2xs transition-colors"
+            onClick={handleRefresh}
+            disabled={loading}
+            className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
             title="Refresh List"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
@@ -91,6 +92,25 @@ export default function WithdrawalsListPage() {
           </Link>
         </div>
       </div>
+
+      {/* Backend Error Banner */}
+      {error && (
+        <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-bold text-rose-800">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>Backend Error: Unable to fetch withdrawals</span>
+            </div>
+            <button
+              onClick={handleRefresh}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-white border border-rose-300 text-rose-800 font-semibold hover:bg-rose-100/60 transition-colors cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> Retry
+            </button>
+          </div>
+          <p className="text-slate-700">{error}</p>
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white p-4 rounded-xl border border-slate-200/80 shadow-2xs">
@@ -106,18 +126,30 @@ export default function WithdrawalsListPage() {
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto">
-          <Filter className="w-4 h-4 text-slate-400" />
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-700 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          >
-            <option value="">All Statuses</option>
-            <option value="settled">Settled</option>
-            <option value="submitted">Submitted</option>
-            <option value="pending">Pending</option>
-            <option value="failed">Failed</option>
-          </select>
+          <Filter className="w-4 h-4 text-slate-400 shrink-0" />
+          <div className="relative w-full sm:w-auto">
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="w-full sm:w-auto pl-3 pr-8 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-700 focus:ring-2 focus:ring-blue-500 focus:outline-none appearance-none cursor-pointer"
+            >
+              <option value="">All Statuses</option>
+              <option value="settled">Settled</option>
+              <option value="submitted">Submitted</option>
+              <option value="pending">Pending</option>
+              <option value="failed">Failed</option>
+            </select>
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          </div>
+
+          {(search || statusFilter) && (
+            <button
+              onClick={handleResetFilters}
+              className="text-xs font-semibold text-blue-600 hover:text-blue-800 underline ml-2 whitespace-nowrap cursor-pointer"
+            >
+              Reset Filters
+            </button>
+          )}
         </div>
       </div>
 
@@ -145,10 +177,24 @@ export default function WithdrawalsListPage() {
                     Loading withdrawals...
                   </td>
                 </tr>
-              ) : filteredWithdrawals.length === 0 ? (
+              ) : error ? (
                 <tr>
                   <td colSpan={8} className="py-12 text-center text-slate-400">
-                    No withdrawals match the selected filters.
+                    Unable to display withdrawals due to backend connection failure.
+                  </td>
+                </tr>
+              ) : filteredWithdrawals.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-12 text-center text-slate-400 space-y-2">
+                    <div>No withdrawals match the selected filters.</div>
+                    {(search || statusFilter) && (
+                      <button
+                        onClick={handleResetFilters}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:underline cursor-pointer"
+                      >
+                        Reset active filters
+                      </button>
+                    )}
                   </td>
                 </tr>
               ) : (

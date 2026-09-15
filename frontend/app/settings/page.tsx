@@ -1,9 +1,23 @@
 'use client';
 
-import React from 'react';
-import { Key, Webhook, Server, Lock } from 'lucide-react';
+import React, { useState } from 'react';
+import { Key, Webhook, Server, Lock, Copy, Check } from 'lucide-react';
 
 export default function SettingsPage() {
+  const [copiedKey, setCopiedKey] = useState(false);
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
+
+  const copyToClipboard = (text: string, type: 'key' | 'webhook') => {
+    navigator.clipboard.writeText(text);
+    if (type === 'key') {
+      setCopiedKey(true);
+      setTimeout(() => setCopiedKey(false), 2000);
+    } else {
+      setCopiedWebhook(true);
+      setTimeout(() => setCopiedWebhook(false), 2000);
+    }
+  };
+
   return (
     <div className="space-y-8 pb-12">
       {/* Header */}
@@ -72,8 +86,16 @@ export default function SettingsPage() {
                   type="text"
                   readOnly
                   value="soap_pub_sandbox_0a9b8c7d6e5f4a3b2c1d0e"
-                  className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700"
+                  className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700 select-all"
                 />
+                <button
+                  onClick={() => copyToClipboard('soap_pub_sandbox_0a9b8c7d6e5f4a3b2c1d0e', 'key')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium transition-colors shadow-2xs"
+                  title="Copy Public Key"
+                >
+                  {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedKey ? 'Copied' : 'Copy'}</span>
+                </button>
               </div>
             </div>
 
@@ -84,7 +106,7 @@ export default function SettingsPage() {
                   type="password"
                   readOnly
                   value="soap_sec_sandbox_••••••••••••••••••••••••••••"
-                  className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-500"
+                  className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-500 select-none"
                 />
               </div>
               <p className="text-[10px] text-slate-400 mt-1">
@@ -104,12 +126,22 @@ export default function SettingsPage() {
           <div className="space-y-3 text-xs">
             <div>
               <span className="text-slate-500 font-medium block">Callback Ingestion URL</span>
-              <input
-                type="text"
-                readOnly
-                value="https://api.soappayments.com/api/webhooks"
-                className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700 mt-1"
-              />
+              <div className="flex items-center gap-2 mt-1">
+                <input
+                  type="text"
+                  readOnly
+                  value="https://api.soappayments.com/api/webhooks"
+                  className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700 select-all"
+                />
+                <button
+                  onClick={() => copyToClipboard('https://api.soappayments.com/api/webhooks', 'webhook')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium transition-colors shadow-2xs"
+                  title="Copy Ingestion URL"
+                >
+                  {copiedWebhook ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedWebhook ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
             </div>
 
             <div>
@@ -118,7 +150,7 @@ export default function SettingsPage() {
                 type="password"
                 readOnly
                 value="whsec_••••••••••••••••••••••••••••"
-                className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-500 mt-1"
+                className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-500 mt-1 select-none"
               />
             </div>
           </div>

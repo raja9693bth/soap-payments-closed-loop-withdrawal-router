@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import {
   RefreshCw,
@@ -14,36 +14,29 @@ import { LedgerViewResponse } from '@/types';
 export default function LedgerPage() {
   const [data, setData] = useState<LedgerViewResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const fetchLedger = async () => {
+  const fetchLedger = useCallback(async () => {
     try {
-      setLoading(true);
       const res = await api.getLedger();
       setData(res);
-    } catch (err) {
-      console.error('Failed to load ledger', err);
+      setError(null);
+    } catch (err: unknown) {
+      setError((err as Error).message || 'Failed to load ledger from backend');
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    fetchLedger();
+  }, [fetchLedger]);
 
   useEffect(() => {
-    let isMounted = true;
-    async function load() {
-      try {
-        const res = await api.getLedger();
-        if (isMounted) setData(res);
-      } catch (err) {
-        console.error('Failed to load ledger', err);
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    }
-    load();
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+    fetchLedger();
+  }, [fetchLedger]);
 
   return (
     <div className="space-y-8 pb-12">
@@ -63,13 +56,33 @@ export default function LedgerPage() {
         </div>
 
         <button
-          onClick={fetchLedger}
-          className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold shadow-2xs transition-colors self-start sm:self-auto"
+          onClick={handleRefresh}
+          disabled={loading}
+          className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold shadow-2xs transition-colors self-start sm:self-auto cursor-pointer disabled:opacity-50"
           title="Refresh Ledger"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {/* Backend Error Banner */}
+      {error && (
+        <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-bold text-rose-800">
+              <span className="w-2 h-2 rounded-full bg-rose-600" />
+              <span>Backend Error: Unable to fetch ledger telemetry</span>
+            </div>
+            <button
+              onClick={handleRefresh}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-white border border-rose-300 text-rose-800 font-semibold hover:bg-rose-100/60 transition-colors cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> Retry
+            </button>
+          </div>
+          <p className="text-slate-700">{error}</p>
+        </div>
+      )}
 
       {/* Reconciliation Banner */}
       {data && (
@@ -133,6 +146,12 @@ export default function LedgerPage() {
                     Verifying ledger transactions...
                   </td>
                 </tr>
+              ) : error ? (
+                <tr>
+                  <td colSpan={6} className="py-12 text-center text-slate-400">
+                    Unable to display ledger entries due to backend connection failure.
+                  </td>
+                </tr>
               ) : (data?.entries || []).length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-12 text-center text-slate-400">
@@ -140,6 +159,7 @@ export default function LedgerPage() {
                   </td>
                 </tr>
               ) : (
+
                 data?.entries.map((entry) => {
                   const isDebit = entry.amount_cents < 0;
                   return (

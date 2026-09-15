@@ -1,13 +1,14 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { ShieldCheck, RefreshCw, Send } from 'lucide-react';
+import React, { useEffect, useState, useCallback } from 'react';
+import { ShieldCheck, RefreshCw, Send, ArrowRight } from 'lucide-react';
 import { api, formatDateTime } from '@/lib/api';
 import { WebhookEventRecord } from '@/types';
 
 export default function WebhooksPage() {
   const [events, setEvents] = useState<WebhookEventRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<WebhookEventRecord | null>(null);
 
   // Manual webhook trigger state
@@ -16,39 +17,31 @@ export default function WebhooksPage() {
   const [triggering, setTriggering] = useState(false);
   const [triggerFeedback, setTriggerFeedback] = useState<string | null>(null);
 
-  const fetchWebhooks = async () => {
+  const fetchWebhooks = useCallback(async () => {
     try {
-      setLoading(true);
       const data = await api.getWebhooks();
-      setEvents(data.webhooks);
-      if (data.webhooks.length > 0) {
+      setEvents(data.webhooks || []);
+      setError(null);
+      if (data.webhooks && data.webhooks.length > 0) {
         setSelectedEvent((prev) => prev || data.webhooks[0]);
       }
-    } catch (err) {
-      console.error('Failed to load webhooks', err);
+    } catch (err: unknown) {
+      setError((err as Error).message || 'Failed to load webhooks from backend');
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    fetchWebhooks();
+  }, [fetchWebhooks]);
 
   useEffect(() => {
-    let isMounted = true;
-    api.getWebhooks()
-      .then((data) => {
-        if (!isMounted) return;
-        setEvents(data.webhooks);
-        if (data.webhooks.length > 0) {
-          setSelectedEvent((prev) => prev || data.webhooks[0]);
-        }
-      })
-      .catch((err) => console.error('Failed to load webhooks', err))
-      .finally(() => {
-        if (isMounted) setLoading(false);
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+    fetchWebhooks();
+  }, [fetchWebhooks]);
+
 
   const handleTriggerWebhook = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -89,13 +82,33 @@ export default function WebhooksPage() {
         </div>
 
         <button
-          onClick={fetchWebhooks}
-          className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold shadow-2xs transition-colors self-start sm:self-auto"
+          onClick={handleRefresh}
+          disabled={loading}
+          className="p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold shadow-2xs transition-colors self-start sm:self-auto cursor-pointer disabled:opacity-50"
           title="Refresh Events"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {/* Backend Error Banner */}
+      {error && (
+        <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-bold text-rose-800">
+              <span className="w-2 h-2 rounded-full bg-rose-600" />
+              <span>Backend Error: Unable to fetch webhooks</span>
+            </div>
+            <button
+              onClick={handleRefresh}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-white border border-rose-300 text-rose-800 font-semibold hover:bg-rose-100/60 transition-colors cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> Retry
+            </button>
+          </div>
+          <p className="text-slate-700">{error}</p>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* Left Table: Event Inbox (7 cols) */}
@@ -119,7 +132,14 @@ export default function WebhooksPage() {
                 {loading ? (
                   <tr>
                     <td colSpan={4} className="py-12 text-center text-slate-400">
+                      <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-slate-400" />
                       Loading webhooks...
+                    </td>
+                  </tr>
+                ) : error ? (
+                  <tr>
+                    <td colSpan={4} className="py-12 text-center text-slate-400">
+                      Unable to display webhook events due to backend connection failure.
                     </td>
                   </tr>
                 ) : events.length === 0 ? (
@@ -129,6 +149,7 @@ export default function WebhooksPage() {
                     </td>
                   </tr>
                 ) : (
+
                   events.map((evt) => (
                     <tr
                       key={evt.id}
@@ -227,16 +248,22 @@ export default function WebhooksPage() {
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Callback Status</label>
-                <select
-                  value={mockStatus}
-                  onChange={(e) => setMockStatus(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-800 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                >
-                  <option value="settled">Settled (payout.settled)</option>
-                  <option value="failed">Failed (payout.failed)</option>
-                  <option value="submitted">Submitted (payout.submitted)</option>
-                </select>
+                <div className="relative">
+                  <select
+                    value={mockStatus}
+                    onChange={(e) => setMockStatus(e.target.value)}
+                    className="w-full pl-3 pr-8 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-800 focus:ring-2 focus:ring-blue-500 focus:outline-none appearance-none cursor-pointer"
+                  >
+                    <option value="settled">Settled (payout.settled)</option>
+                    <option value="failed">Failed (payout.failed)</option>
+                    <option value="submitted">Submitted (payout.submitted)</option>
+                  </select>
+                  <div className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">
+                    <ArrowRight className="w-3 h-3 rotate-90" />
+                  </div>
+                </div>
               </div>
+
 
               {triggerFeedback && (
                 <p className="text-[11px] font-medium text-blue-600">{triggerFeedback}</p>
