@@ -216,8 +216,13 @@ class ApiClient {
     return this.request<DashboardMetrics>('/api/dashboard');
   }
 
-  async getUsers() {
-    return this.request<{ users: User[] }>('/api/users');
+  async getUsers(params: { q?: string; page?: number; page_size?: number } = {}) {
+    const searchParams = new URLSearchParams();
+    if (params.q) searchParams.set('q', params.q);
+    if (params.page) searchParams.set('page', params.page.toString());
+    if (params.page_size) searchParams.set('page_size', params.page_size.toString());
+    const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+    return this.request<{ users: User[]; pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/users${query}`);
   }
 
   async getUser(id: number | string) {
@@ -239,12 +244,20 @@ class ApiClient {
     return this.request<{ payment_methods: PaymentMethod[] }>('/api/payment-methods');
   }
 
-  async getWithdrawals(params: { status?: string; user_id?: number } = {}) {
+  async getWithdrawals(params: { status?: string; user_id?: number; page?: number; page_size?: number; q?: string } = {}) {
     const searchParams = new URLSearchParams();
     if (params.status) searchParams.set('status', params.status);
     if (params.user_id) searchParams.set('user_id', params.user_id.toString());
+    if (params.page) searchParams.set('page', params.page.toString());
+    if (params.page_size) searchParams.set('page_size', params.page_size.toString());
+    if (params.q) searchParams.set('q', params.q);
     const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
-    return this.request<{ withdrawals: Withdrawal[]; total: number }>(`/api/withdrawals${query}`);
+    return this.request<{
+      withdrawals: Withdrawal[];
+      total: number;
+      pagination?: import('@/types').PaginationMeta;
+      returned_count?: number;
+    }>(`/api/withdrawals${query}`);
   }
 
   async getWithdrawal(id: number | string) {
@@ -258,12 +271,20 @@ class ApiClient {
     });
   }
 
-  async getLedger() {
-    return this.request<LedgerViewResponse>('/api/ledger');
+  async getLedger(params: { page?: number; page_size?: number } = {}) {
+    const searchParams = new URLSearchParams();
+    if (params.page) searchParams.set('page', params.page.toString());
+    if (params.page_size) searchParams.set('page_size', params.page_size.toString());
+    const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+    return this.request<LedgerViewResponse & { pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/ledger${query}`);
   }
 
-  async getWebhooks() {
-    return this.request<{ webhooks: WebhookEventRecord[] }>('/api/webhooks');
+  async getWebhooks(params: { page?: number; page_size?: number } = {}) {
+    const searchParams = new URLSearchParams();
+    if (params.page) searchParams.set('page', params.page.toString());
+    if (params.page_size) searchParams.set('page_size', params.page_size.toString());
+    const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
+    return this.request<{ webhooks: WebhookEventRecord[]; pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/webhooks${query}`);
   }
 
   async postWebhook(event: Record<string, unknown>) {
@@ -274,7 +295,9 @@ class ApiClient {
   }
 
   async getAuditLogs() {
-    return this.request<{ audit_logs: AuditLogEvent[]; environment: string }>('/api/audit-logs');
+    return this.request<{ audit_logs: AuditLogEvent[]; activity_logs?: AuditLogEvent[]; environment: string }>(
+      '/api/audit-logs'
+    );
   }
 }
 

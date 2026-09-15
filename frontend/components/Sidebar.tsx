@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   Layers,
   ChevronRight,
+  X,
 } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -28,18 +29,34 @@ const NAV_ITEMS = [
   { name: 'Ledger', href: '/ledger', icon: BookOpenCheck },
   { name: 'Webhooks', href: '/webhooks', icon: Webhook },
   { name: 'Developers', href: '/developers', icon: Code2 },
-  { name: 'Audit Logs', href: '/audit-logs', icon: ScrollText },
+  { name: 'Activity Logs', href: '/audit-logs', icon: ScrollText },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];
 
-export const Sidebar: React.FC = () => {
+interface SidebarProps {
+  isDrawer?: boolean;
+  onClose?: () => void;
+  className?: string;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({ isDrawer = false, onClose, className = '' }) => {
   const pathname = usePathname();
 
+  const handleLinkClick = () => {
+    if (isDrawer && onClose) {
+      onClose();
+    }
+  };
+
+  const containerClasses = isDrawer
+    ? `w-72 max-w-[85vw] bg-slate-900 text-slate-200 flex flex-col h-full select-none ${className}`
+    : `hidden lg:flex w-64 bg-slate-900 text-slate-200 flex-col h-screen fixed left-0 top-0 z-30 border-r border-slate-800 select-none ${className}`;
+
   return (
-    <aside className="w-64 bg-slate-900 text-slate-200 flex flex-col h-screen fixed left-0 top-0 z-30 border-r border-slate-800 select-none">
+    <aside className={containerClasses}>
       {/* Brand Header */}
-      <div className="p-5 border-b border-slate-800/80">
-        <Link href="/overview" className="flex items-center gap-3 group">
+      <div className="p-4 sm:p-5 border-b border-slate-800/80 flex items-center justify-between">
+        <Link href="/overview" onClick={handleLinkClick} className="flex items-center gap-3 group">
           <div className="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center text-white shadow-sm font-bold tracking-wider group-hover:bg-blue-500 transition-colors">
             <Layers className="w-5 h-5" />
           </div>
@@ -55,6 +72,17 @@ export const Sidebar: React.FC = () => {
             </div>
           </div>
         </Link>
+
+        {/* Drawer close button (X) */}
+        {isDrawer && (
+          <button
+            onClick={onClose}
+            aria-label="Close navigation"
+            className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500 cursor-pointer -mr-2"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        )}
       </div>
 
       {/* Navigation */}
@@ -72,7 +100,8 @@ export const Sidebar: React.FC = () => {
             <Link
               key={item.name}
               href={item.href}
-              className={`flex items-center justify-between px-3 py-2 rounded-lg text-[13px] font-medium transition-colors ${
+              onClick={handleLinkClick}
+              className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-[13px] font-medium transition-colors ${
                 isActive
                   ? 'bg-blue-600 text-white shadow-sm'
                   : item.highlight

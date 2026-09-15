@@ -1,11 +1,22 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Key, Webhook, Server, Lock, Copy, Check } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Key, Webhook, Server, ShieldCheck, Copy, Check, Info } from 'lucide-react';
+import { api } from '@/lib/api';
 
 export default function SettingsPage() {
   const [copiedKey, setCopiedKey] = useState(false);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const [webhookUrl, setWebhookUrl] = useState('/api/webhooks');
+
+  useEffect(() => {
+    const base = api.getBaseUrl();
+    if (base) {
+      setWebhookUrl(`${base}/api/webhooks`);
+    } else if (typeof window !== 'undefined') {
+      setWebhookUrl(`${window.location.origin}/api/webhooks`);
+    }
+  }, []);
 
   const copyToClipboard = (text: string, type: 'key' | 'webhook') => {
     navigator.clipboard.writeText(text);
@@ -24,18 +35,30 @@ export default function SettingsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-6 border-b border-slate-200">
         <div>
           <div className="text-[11px] font-bold tracking-widest text-blue-600 uppercase">
-            Configuration &amp; Security
+            Configuration &amp; Diagnostics
           </div>
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 mt-1">
-            System Settings
+            Sandbox Settings
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-2xl leading-relaxed">
-            Configure environment parameters, security headers, and sandbox testing preferences.
+            Configure sandbox testing parameters, inspect simulated API contracts, and review
+            mathematical invariant assurances.
           </p>
         </div>
 
-        <div className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
-          <span className="w-2 h-2 rounded-full bg-amber-500" /> Environment: Sandbox
+        <div className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 self-start sm:self-auto">
+          <span className="w-2 h-2 rounded-full bg-amber-500" /> Mode: Developer Sandbox
+        </div>
+      </div>
+
+      {/* Honest Scope Banner */}
+      <div className="p-4 rounded-xl bg-blue-50 border border-blue-200/80 flex items-start gap-3 text-xs text-blue-900">
+        <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+        <div className="leading-relaxed">
+          <span className="font-bold">Portfolio Demonstration Notice: </span>
+          This system is an unauthenticated, isolated developer sandbox. No live banking credentials,
+          real PANs, or actual funds are handled. All payment instruments and accounts are simulated
+          using deterministic sandbox test data.
         </div>
       </div>
 
@@ -44,29 +67,33 @@ export default function SettingsPage() {
         <div className="bg-white rounded-xl border border-slate-200/80 p-5 shadow-2xs space-y-4">
           <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
             <Server className="w-4 h-4 text-blue-600" />
-            <h2 className="text-sm font-bold text-slate-900">Environment Details</h2>
+            <h2 className="text-sm font-bold text-slate-900">Deployment Architecture</h2>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
             <div>
-              <span className="text-slate-500 font-medium block">Deployment Target</span>
+              <span className="text-slate-500 font-medium block">Frontend Target</span>
               <span className="font-mono font-semibold text-slate-800 mt-1 block">
-                Frontend: Vercel | API: Render
+                Next.js 15 on Vercel Edge
+              </span>
+            </div>
+            <div>
+              <span className="text-slate-500 font-medium block">Backend API Target</span>
+              <span className="font-mono font-semibold text-slate-800 mt-1 block">
+                Ruby 3.3 / Sinatra on Render
               </span>
             </div>
             <div>
               <span className="text-slate-500 font-medium block">Database Layer</span>
               <span className="font-mono font-semibold text-slate-800 mt-1 block">
-                PostgreSQL (Strict Append-Only Ledger)
+                PostgreSQL (Append-Only Double-Entry Ledger)
               </span>
             </div>
             <div>
-              <span className="text-slate-500 font-medium block">Domain Engine Version</span>
-              <span className="font-mono font-semibold text-slate-800 mt-1 block">v1.0.0 (Authoritative)</span>
-            </div>
-            <div>
-              <span className="text-slate-500 font-medium block">Idempotency Retention</span>
-              <span className="font-mono font-semibold text-slate-800 mt-1 block">Permanent Key Store</span>
+              <span className="text-slate-500 font-medium block">Domain Engine</span>
+              <span className="font-mono font-semibold text-slate-800 mt-1 block">
+                Authoritative Orchestration Services
+              </span>
             </div>
           </div>
         </div>
@@ -75,42 +102,37 @@ export default function SettingsPage() {
         <div className="bg-white rounded-xl border border-slate-200/80 p-5 shadow-2xs space-y-4">
           <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
             <Key className="w-4 h-4 text-slate-700" />
-            <h2 className="text-sm font-bold text-slate-900">API Credentials</h2>
+            <h2 className="text-sm font-bold text-slate-900">Sandbox API Access</h2>
           </div>
 
           <div className="space-y-3 text-xs">
             <div>
-              <span className="text-slate-500 font-medium block">Sandbox Public Key</span>
+              <div className="flex items-center justify-between max-w-md">
+                <span className="text-slate-500 font-medium block">Sandbox Demonstration Key</span>
+                <span className="text-[10px] text-amber-700 font-semibold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                  Demo Only
+                </span>
+              </div>
               <div className="flex items-center gap-2 mt-1">
                 <input
                   type="text"
                   readOnly
-                  value="soap_pub_sandbox_0a9b8c7d6e5f4a3b2c1d0e"
-                  className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700 select-all"
+                  value="soap_pub_sandbox_demo_key_unrestricted"
+                  className="w-full max-w-md px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700 select-all"
+                  aria-label="Sandbox Public Key"
                 />
                 <button
-                  onClick={() => copyToClipboard('soap_pub_sandbox_0a9b8c7d6e5f4a3b2c1d0e', 'key')}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium transition-colors shadow-2xs"
-                  title="Copy Public Key"
+                  onClick={() => copyToClipboard('soap_pub_sandbox_demo_key_unrestricted', 'key')}
+                  className="min-h-[40px] flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium transition-colors shadow-2xs cursor-pointer focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                  title="Copy Demo Key"
+                  aria-label="Copy Demo Key"
                 >
                   {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedKey ? 'Copied' : 'Copy'}</span>
                 </button>
               </div>
-            </div>
-
-            <div>
-              <span className="text-slate-500 font-medium block">Secret Key (Masked)</span>
-              <div className="flex items-center gap-2 mt-1">
-                <input
-                  type="password"
-                  readOnly
-                  value="soap_sec_sandbox_••••••••••••••••••••••••••••"
-                  className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-500 select-none"
-                />
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1">
-                Production secrets are strictly injected through environment variables and never logged or exposed.
+              <p className="text-[11px] text-slate-400 mt-1">
+                This sandbox key is unauthenticated for public portfolio evaluation. No real customer data is accessed.
               </p>
             </div>
           </div>
@@ -120,38 +142,47 @@ export default function SettingsPage() {
         <div className="bg-white rounded-xl border border-slate-200/80 p-5 shadow-2xs space-y-4">
           <div className="flex items-center gap-2 pb-3 border-b border-slate-100">
             <Webhook className="w-4 h-4 text-purple-600" />
-            <h2 className="text-sm font-bold text-slate-900">Webhook Endpoints</h2>
+            <h2 className="text-sm font-bold text-slate-900">Sandbox Webhook Configuration</h2>
           </div>
 
           <div className="space-y-3 text-xs">
             <div>
-              <span className="text-slate-500 font-medium block">Callback Ingestion URL</span>
+              <span className="text-slate-500 font-medium block">Sandbox Ingestion Endpoint</span>
               <div className="flex items-center gap-2 mt-1">
                 <input
                   type="text"
                   readOnly
-                  value="https://api.soappayments.com/api/webhooks"
-                  className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700 select-all"
+                  value={webhookUrl}
+                  className="w-full max-w-md px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-700 select-all"
+                  aria-label="Webhook Callback URL"
                 />
                 <button
-                  onClick={() => copyToClipboard('https://api.soappayments.com/api/webhooks', 'webhook')}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium transition-colors shadow-2xs"
+                  onClick={() => copyToClipboard(webhookUrl, 'webhook')}
+                  className="min-h-[40px] flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium transition-colors shadow-2xs cursor-pointer focus:outline-hidden focus:ring-2 focus:ring-blue-500"
                   title="Copy Ingestion URL"
+                  aria-label="Copy Ingestion URL"
                 >
                   {copiedWebhook ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedWebhook ? 'Copied' : 'Copy'}</span>
                 </button>
               </div>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Resolved to current deployment environment. Accepts simulated provider callbacks (success, failure, late failure).
+              </p>
             </div>
 
             <div>
-              <span className="text-slate-500 font-medium block">Webhook Signing Secret</span>
+              <span className="text-slate-500 font-medium block">HMAC Signing Secret (Sandbox Example)</span>
               <input
-                type="password"
+                type="text"
                 readOnly
-                value="whsec_••••••••••••••••••••••••••••"
-                className="w-full max-w-md px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-500 mt-1 select-none"
+                value="whsec_sandbox_demo_key_untrusted"
+                className="w-full max-w-md px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 font-mono text-xs text-slate-500 mt-1 select-all"
+                aria-label="Sandbox Signing Secret"
               />
+              <p className="text-[11px] text-slate-400 mt-1">
+                Permissive in sandbox test mode; verified with HMAC-SHA256 constant-time comparison when header is provided.
+              </p>
             </div>
           </div>
         </div>
@@ -159,15 +190,31 @@ export default function SettingsPage() {
         {/* Security & Invariant Guarantee */}
         <div className="bg-white rounded-xl border border-slate-200/80 p-5 shadow-2xs space-y-3">
           <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
-            <Lock className="w-4 h-4 text-emerald-600" />
-            <h2 className="text-sm font-bold text-slate-900">Security &amp; Invariant Assurances</h2>
+            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+            <h2 className="text-sm font-bold text-slate-900">Verified System Invariants</h2>
           </div>
 
-          <ul className="text-xs text-slate-600 space-y-1.5 list-disc pl-5">
-            <li>Pessimistic row locking ensures zero balance races under high concurrency.</li>
-            <li>Idempotency keys deduplicate requests and reject parameter tampering.</li>
-            <li>Strict asset-family boundary protects against cross-asset fund leakage.</li>
-            <li>Immutable ledger prevents balance divergence with zero destructive updates.</li>
+          <ul className="text-xs text-slate-600 space-y-2 list-disc pl-5">
+            <li>
+              <span className="font-semibold text-slate-800">Pessimistic Balance Row Locking: </span>
+              Database-level row locks ensure zero balance drift under concurrent withdrawal attempts.
+            </li>
+            <li>
+              <span className="font-semibold text-slate-800">Database Idempotency Store: </span>
+              Prevents double payouts; payload tampering returns <code>409 Conflict</code>.
+            </li>
+            <li>
+              <span className="font-semibold text-slate-800">FIFO Closed-Loop Refund: </span>
+              Refunds originating deposit methods chronologically before releasing residual payout.
+            </li>
+            <li>
+              <span className="font-semibold text-slate-800">Asset-Family Isolation: </span>
+              Rejects cross-asset fund leakage (e.g. fiat card to cryptocurrency).
+            </li>
+            <li>
+              <span className="font-semibold text-slate-800">Double-Entry Append-Only Ledger: </span>
+              Mathematical equality between account balance and the sum of ledger deltas.
+            </li>
           </ul>
         </div>
       </div>

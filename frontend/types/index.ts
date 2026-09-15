@@ -1,4 +1,10 @@
-// Types for SOAP Payments Fintech Operations Platform
+export interface PaginationMeta {
+  page: number;
+  page_size: number;
+  total_count: number;
+  total_pages: number;
+  returned_count: number;
+}
 
 export interface User {
   id: number;

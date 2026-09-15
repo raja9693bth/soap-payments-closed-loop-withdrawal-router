@@ -70,7 +70,7 @@ export default function PaymentInstrumentsPage() {
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
           <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-medium">
-            <Lock className="w-3.5 h-3.5" /> PCI Safe: Tokens Strictly Masked
+            <Lock className="w-3.5 h-3.5" /> Sensitive Values Masked: Sandbox Instruments (No Raw PAN Displayed)
           </div>
         </div>
       </div>

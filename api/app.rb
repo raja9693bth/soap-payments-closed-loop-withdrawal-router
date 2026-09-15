@@ -12,6 +12,7 @@ require 'active_support/core_ext/time/calculations'
 require 'yaml'
 require 'erb'
 require 'pg'
+require 'openssl'
 
 # Ensure app models and services are loaded
 app_root = File.expand_path('..', __dir__)
@@ -20,6 +21,10 @@ Dir[File.expand_path('../app/models/*.rb', __dir__)].sort.each { |f| require f }
 Dir[File.expand_path('../app/services/*.rb', __dir__)].sort.each { |f| require f }
 
 class SoapPaymentsApi < Sinatra::Base
+  # Simple in-memory sliding window rate limiter for sandbox abuse protection
+  RATE_LIMIT_STORE = Hash.new { |h, k| h[k] = [] }
+  RATE_LIMIT_MUTEX = Mutex.new
+
   # 1. Establish database connection if not already connected
   def self.ensure_database_connection!
     return if ActiveRecord::Base.connected?
@@ -42,16 +47,39 @@ class SoapPaymentsApi < Sinatra::Base
     set :show_exceptions, false
     set :raise_errors, false
     set :dump_errors, false
-    set :host_authorization, { allow_if: ->(_env) { true } }
+
+    # Safe Host Authorization appropriate to deployment
+    permitted_hosts = [
+      'localhost',
+      '127.0.0.1',
+      'example.org',
+      /\.render\.com\z/,
+      /\.onrender\.com\z/
+    ]
+    if ENV['RENDER_EXTERNAL_HOSTNAME'].present?
+      permitted_hosts << ENV['RENDER_EXTERNAL_HOSTNAME']
+    end
+    if ENV['HOST_AUTHORIZATION_ALLOWED_HOSTS'].present?
+      permitted_hosts.concat(ENV['HOST_AUTHORIZATION_ALLOWED_HOSTS'].split(',').map(&:strip))
+    end
+    set :host_authorization, { permitted_hosts: permitted_hosts }
   end
 
-  # 2. CORS configuration
-  allowed_origins_env = ENV.fetch('ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001')
-  allowed_origins = allowed_origins_env.split(',').map(&:strip)
+  # 2. CORS configuration with explicit origin validation
+  is_dev = ENV.fetch('RACK_ENV', 'development') == 'development' || ENV.fetch('RACK_ENV', 'development') == 'test'
+  allowed_origins_env = ENV['ALLOWED_ORIGINS']
+
+  configured_origins = if allowed_origins_env.present?
+                         allowed_origins_env.split(',').map(&:strip)
+                       elsif is_dev
+                         ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:3001']
+                       else
+                         ['https://soap-payments-closed-loop-withdrawal-router.vercel.app']
+                       end
 
   use Rack::Cors do
     allow do
-      origins(*allowed_origins, /https:\/\/.*\.vercel\.app\z/)
+      origins(*configured_origins)
       resource '*',
                headers: :any,
                methods: %i[get post put patch delete options head],
@@ -62,12 +90,14 @@ class SoapPaymentsApi < Sinatra::Base
   before do
     content_type :json
     headers 'X-Environment' => 'sandbox',
-            'X-API-Version' => 'v1.0.0'
+            'X-API-Version' => 'v1.0.0',
+            'X-Sandbox-Mode' => 'enabled',
+            'X-Sandbox-Auth' => 'open-access-demo'
   end
 
   options '*' do
     response.headers['Allow'] = 'HEAD,GET,PUT,POST,DELETE,OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'X-Requested-With, X-HTTP-Method-Override, Content-Type, Cache-Control, Accept, Authorization'
+    response.headers['Access-Control-Allow-Headers'] = 'X-Requested-With, X-HTTP-Method-Override, Content-Type, Cache-Control, Accept, Authorization, X-Webhook-Signature, X-Webhook-Timestamp'
     200
   end
 
@@ -96,6 +126,83 @@ class SoapPaymentsApi < Sinatra::Base
       JSON.parse(raw)
     end
 
+    def check_rate_limit!(limit: 60, window_seconds: 60)
+      client_ip = request.ip || '127.0.0.1'
+      now = Time.now.to_f
+
+      RATE_LIMIT_MUTEX.synchronize do
+        timestamps = RATE_LIMIT_STORE[client_ip].select { |t| now - t < window_seconds }
+        if timestamps.size >= limit
+          halt 429, { error: { code: 'rate_limit_exceeded', message: "Too many requests. Sandbox limit is #{limit} requests per minute." } }.to_json
+        end
+        timestamps << now
+        RATE_LIMIT_STORE[client_ip] = timestamps
+      end
+    end
+
+    def verify_webhook_signature!(raw_body)
+      # 1. Payload size limit (max 64KB)
+      if raw_body.bytesize > 65_536
+        halt 413, { error: { code: 'payload_too_large', message: 'Webhook payload exceeds 64KB limit' } }.to_json
+      end
+
+      signature = request.env['HTTP_X_WEBHOOK_SIGNATURE'] || request.env['HTTP_SOAP_SIGNATURE']
+      timestamp = request.env['HTTP_X_WEBHOOK_TIMESTAMP']
+
+      # In sandbox mode, if signature header is absent, allow it but mark as sandbox-unverified
+      if signature.blank?
+        headers 'X-Webhook-Auth' => 'sandbox-unverified'
+        return
+      end
+
+      # 2. Timestamp freshness check (replay protection within 300s)
+      if timestamp.present?
+        req_time = timestamp.to_i
+        if (Time.current.to_i - req_time).abs > 300
+          halt 401, { error: { code: 'webhook_timestamp_expired', message: 'Webhook timestamp outside valid replay window (+/- 5 minutes)' } }.to_json
+        end
+      end
+
+      # 3. Constant-time signature verification
+      secret = ENV.fetch('WEBHOOK_SIGNING_SECRET', 'whsec_sandbox_demo_key_untrusted')
+      expected_sig_with_ts = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{raw_body}")
+      expected_sig_raw = OpenSSL::HMAC.hexdigest('SHA256', secret, raw_body)
+
+      valid = Rack::Utils.secure_compare(signature, expected_sig_with_ts) ||
+              Rack::Utils.secure_compare(signature, expected_sig_raw)
+
+      unless valid
+        halt 401, { error: { code: 'invalid_webhook_signature', message: 'HMAC signature verification failed' } }.to_json
+      end
+
+      headers 'X-Webhook-Auth' => 'hmac-verified'
+    end
+
+    def paginate_scope(scope, default_size: 20, max_size: 100)
+      page = [params[:page].to_i, 1].max
+      page_size = params[:page_size] ? params[:page_size].to_i : (params[:per_page] ? params[:per_page].to_i : default_size)
+      page_size = [[page_size, 1].max, max_size].min
+      offset = (page - 1) * page_size
+
+      total_count = if scope.group_values.present?
+                      scope.reselect(:id).distinct.count
+                    else
+                      scope.count
+                    end
+      total_count = total_count.is_a?(Hash) ? total_count.size : total_count.to_i
+
+      records = scope.offset(offset).limit(page_size)
+      total_pages = total_count.positive? ? (total_count.to_f / page_size).ceil : 1
+
+      [records, {
+        page: page,
+        page_size: page_size,
+        total_count: total_count,
+        total_pages: total_pages,
+        returned_count: records.size
+      }]
+    end
+
     def mask_token(token, asset_class)
       digits = token.to_s.gsub(/\D/, '')
       last4 = digits.length >= 4 ? digits[-4..] : (token.to_s[-4..] || '0000')
@@ -112,12 +219,15 @@ class SoapPaymentsApi < Sinatra::Base
     end
 
     def serialize_user(user)
+      pm_count = user.respond_to?(:pm_count) ? user.pm_count.to_i : user.payment_methods.count
+      wd_count = user.respond_to?(:wd_count) ? user.wd_count.to_i : user.withdrawals.count
+
       {
         id: user.id,
         email: user.email,
         balance_cents: user.balance_cents,
-        payment_methods_count: user.payment_methods.count,
-        withdrawals_count: user.withdrawals.count,
+        payment_methods_count: pm_count,
+        withdrawals_count: wd_count,
         created_at: user.created_at
       }
     end
@@ -132,9 +242,16 @@ class SoapPaymentsApi < Sinatra::Base
       }
     end
 
-    def serialize_leg(leg)
+    def serialize_leg(leg, user_deposit_pm_ids: nil)
       pm = leg.payment_method
-      is_refund = leg.withdrawal && leg.withdrawal.user.deposits.where(payment_method_id: leg.payment_method_id).exists?
+      is_refund = if user_deposit_pm_ids
+                    user_deposit_pm_ids.include?(leg.payment_method_id)
+                  elsif leg.withdrawal && leg.withdrawal.user
+                    leg.withdrawal.user.deposits.where(payment_method_id: leg.payment_method_id).exists?
+                  else
+                    false
+                  end
+
       {
         id: leg.id,
         withdrawal_id: leg.withdrawal_id,
@@ -150,7 +267,8 @@ class SoapPaymentsApi < Sinatra::Base
       }
     end
 
-    def serialize_withdrawal(w)
+    def serialize_withdrawal(w, user_deposit_pm_ids: nil)
+      legs_count = w.payout_legs.loaded? ? w.payout_legs.size : w.payout_legs.count
       {
         id: w.id,
         user_id: w.user_id,
@@ -158,7 +276,7 @@ class SoapPaymentsApi < Sinatra::Base
         amount_cents: w.amount_cents,
         state: w.state,
         idempotency_key_masked: w.idempotency_key ? "#{w.idempotency_key[0..6]}...#{w.idempotency_key[-4..]}" : nil,
-        legs_count: w.payout_legs.count,
+        legs_count: legs_count,
         created_at: w.created_at,
         updated_at: w.updated_at
       }
@@ -172,7 +290,7 @@ class SoapPaymentsApi < Sinatra::Base
   # Health endpoint
   get '/api/health' do
     db_ok = begin
-      ActiveRecord::Base.connected? || User.table_exists?
+      User.table_exists?
     rescue StandardError
       false
     end
@@ -180,66 +298,91 @@ class SoapPaymentsApi < Sinatra::Base
     {
       status: db_ok ? 'ok' : 'degraded',
       environment: 'sandbox',
+      auth_model: 'unauthenticated_sandbox_demo',
       database: db_ok ? 'connected' : 'disconnected',
       version: 'v1.0.0',
       timestamp: Time.current.iso8601
     }.to_json
   end
 
-  # Dashboard aggregation
+  # Dashboard aggregation - Optimized via SQL aggregates
   get '/api/dashboard' do
-    withdrawals = Withdrawal.all
-    users = User.all
-    total_withdrawals_count = withdrawals.count
+    # 1. State counts and distribution via single SQL group query
+    state_counts = Withdrawal.group(:state).count
+    settled_count = state_counts['settled'] || 0
+    submitted_count = state_counts['submitted'] || 0
+    failed_count = state_counts['failed'] || 0
+    pending_count = state_counts['pending'] || 0
+    total_withdrawals_count = state_counts.values.sum
 
-    settled_withdrawals = withdrawals.where(state: 'settled')
-    submitted_withdrawals = withdrawals.where(state: 'submitted')
-    failed_withdrawals = withdrawals.where(state: 'failed')
-    pending_withdrawals = withdrawals.where(state: 'pending')
+    # 2. Total volume via single SQL sum
+    total_volume_cents = Withdrawal.where(state: %w[settled submitted]).sum(:amount_cents) || 0
 
-    total_volume_cents = (settled_withdrawals + submitted_withdrawals).sum(&:amount_cents)
-
-    finished_count = settled_withdrawals.count + failed_withdrawals.count
+    # 3. Success rate
+    finished_count = settled_count + failed_count
     success_rate = if finished_count.positive?
-                     ((settled_withdrawals.count.to_f / finished_count) * 100).round(1)
+                     ((settled_count.to_f / finished_count) * 100).round(1)
                    else
                      100.0
                    end
 
-    # Check ledger reconciliation across all users
-    reconciliation_mismatches = 0
-    users.find_each do |u|
-      ledger_sum = u.ledger_entries.sum(:amount_cents)
-      reconciliation_mismatches += 1 if ledger_sum != u.balance_cents
+    # 4. Check ledger reconciliation across users via single SQL query
+    user_balances_total = User.sum(:balance_cents) || 0
+    ledger_entries_total = LedgerEntry.sum(:amount_cents) || 0
+    ledger_balanced = (user_balances_total == ledger_entries_total)
+
+    # 5. 7-day trend series via single SQL group query
+    seven_days_ago = 6.days.ago.beginning_of_day
+    daily_stats = Withdrawal.where('created_at >= ?', seven_days_ago)
+                            .group("DATE(created_at)", :state)
+                            .pluck(Arel.sql("DATE(created_at)::text"), :state, Arel.sql("COUNT(*)"), Arel.sql("COALESCE(SUM(amount_cents), 0)"))
+
+    # Organize daily stats by date string
+    stats_by_date = Hash.new { |h, k| h[k] = { successful_cents: 0, failed_cents: 0, pending_cents: 0, count: 0 } }
+    daily_stats.each do |date_str, state, count, sum_cents|
+      date_key = date_str.to_s
+      stats_by_date[date_key][:count] += count.to_i
+      case state
+      when 'settled', 'submitted'
+        stats_by_date[date_key][:successful_cents] += sum_cents.to_i
+      when 'failed'
+        stats_by_date[date_key][:failed_cents] += sum_cents.to_i
+      when 'pending'
+        stats_by_date[date_key][:pending_cents] += sum_cents.to_i
+      end
     end
 
-    # 7-day trend series
     today = Date.current
     trends_7d = (0..6).to_a.reverse.map do |days_ago|
       day = today - days_ago.days
-      day_start = day.beginning_of_day
-      day_end = day.end_of_day
-
-      day_withdrawals = withdrawals.where('created_at >= ? AND created_at <= ?', day_start, day_end)
+      day_key = day.to_s
+      metrics = stats_by_date[day_key]
       {
         date: day.strftime('%b %d'),
-        successful_cents: day_withdrawals.where(state: %w[settled submitted]).sum(:amount_cents),
-        failed_cents: day_withdrawals.where(state: 'failed').sum(:amount_cents),
-        pending_cents: day_withdrawals.where(state: 'pending').sum(:amount_cents),
-        count: day_withdrawals.count
+        successful_cents: metrics[:successful_cents],
+        failed_cents: metrics[:failed_cents],
+        pending_cents: metrics[:pending_cents],
+        count: metrics[:count]
       }
     end
 
     outcome_distribution = {
-      settled: settled_withdrawals.count,
-      submitted: submitted_withdrawals.count,
-      failed: failed_withdrawals.count,
-      pending: pending_withdrawals.count,
+      settled: settled_count,
+      submitted: submitted_count,
+      failed: failed_count,
+      pending: pending_count,
       success_pct: success_rate
     }
 
-    recent_withdrawals = withdrawals.order(created_at: :desc).limit(6).map do |w|
-      serialize_withdrawal(w).merge(legs: w.payout_legs.map { |l| serialize_leg(l) })
+    # Recent withdrawals with eager loaded legs and payment methods
+    recent_withdrawals = Withdrawal.includes(:user, payout_legs: :payment_method)
+                                   .order(created_at: :desc)
+                                   .limit(6)
+                                   .map do |w|
+      user_deposit_pm_ids = w.user ? w.user.deposits.pluck(:payment_method_id).to_set : Set.new
+      serialize_withdrawal(w, user_deposit_pm_ids: user_deposit_pm_ids).merge(
+        legs: w.payout_legs.map { |l| serialize_leg(l, user_deposit_pm_ids: user_deposit_pm_ids) }
+      )
     end
 
     {
@@ -247,15 +390,15 @@ class SoapPaymentsApi < Sinatra::Base
         total_volume_cents: total_volume_cents,
         total_withdrawals_count: total_withdrawals_count,
         success_rate: success_rate,
-        ledger_balanced: reconciliation_mismatches.zero?,
-        active_users_count: users.count
+        ledger_balanced: ledger_balanced,
+        active_users_count: User.count
       },
       trends_7d: trends_7d,
       outcome_distribution: outcome_distribution,
       system_status: {
         router: 'healthy',
         dispatcher: 'healthy',
-        ledger: reconciliation_mismatches.zero? ? 'healthy' : 'degraded',
+        ledger: ledger_balanced ? 'healthy' : 'degraded',
         webhook: 'healthy',
         database: 'healthy',
         last_checked: Time.current.iso8601
@@ -265,12 +408,22 @@ class SoapPaymentsApi < Sinatra::Base
     }.to_json
   end
 
-  # Users endpoints
+  # Users endpoints - Eager loaded without N+1
   get '/api/users' do
-    users = User.order(id: :asc).map do |u|
-      serialize_user(u)
+    scope = User.left_joins(:payment_methods, :withdrawals)
+                .group(:id)
+                .select('users.*, COUNT(DISTINCT payment_methods.id) AS pm_count, COUNT(DISTINCT withdrawals.id) AS wd_count')
+                .order(id: :asc)
+
+    if params[:q].present? || params[:search].present?
+      term = "%#{(params[:q] || params[:search]).strip}%"
+      scope = scope.where("users.email ILIKE ?", term)
     end
-    { users: users }.to_json
+
+    records, pagination = paginate_scope(scope, default_size: 50)
+    users = records.map { |u| serialize_user(u) }
+
+    { users: users, pagination: pagination, returned_count: users.size }.to_json
   end
 
   get '/api/users/:id' do
@@ -282,7 +435,7 @@ class SoapPaymentsApi < Sinatra::Base
     {
       user: serialize_user(user),
       payment_methods: user.payment_methods.map { |pm| serialize_payment_method(pm) },
-      deposits: user.deposits.order(settled_at: :desc).map do |d|
+      deposits: user.deposits.includes(:payment_method).order(settled_at: :desc).map do |d|
         pm = d.payment_method
         {
           id: d.id,
@@ -312,26 +465,44 @@ class SoapPaymentsApi < Sinatra::Base
     { payment_methods: pms }.to_json
   end
 
-  # Withdrawals endpoints
+  # Withdrawals endpoints - Server-side search & pagination
   get '/api/withdrawals' do
-    scope = Withdrawal.includes(:user, :payout_legs).order(created_at: :desc)
+    scope = Withdrawal.includes(:user, payout_legs: :payment_method).order(created_at: :desc)
 
     scope = scope.where(user_id: params[:user_id]) if params[:user_id].present?
     scope = scope.where(state: params[:status]) if params[:status].present?
 
-    withdrawals = scope.limit(50).map do |w|
-      serialize_withdrawal(w).merge(
-        legs: w.payout_legs.map { |l| serialize_leg(l) }
+    if params[:q].present? || params[:search].present?
+      q = (params[:q] || params[:search]).strip
+      if q =~ /\A\d+\z/
+        scope = scope.where("withdrawals.id = :id OR withdrawals.user_id = :id", id: q.to_i)
+      else
+        scope = scope.joins(:user).where("users.email ILIKE :term OR withdrawals.idempotency_key ILIKE :term", term: "%#{q}%")
+      end
+    end
+
+    records, pagination = paginate_scope(scope, default_size: 20)
+
+    withdrawals = records.map do |w|
+      user_deposit_pm_ids = w.user ? w.user.deposits.pluck(:payment_method_id).to_set : Set.new
+      serialize_withdrawal(w, user_deposit_pm_ids: user_deposit_pm_ids).merge(
+        legs: w.payout_legs.map { |l| serialize_leg(l, user_deposit_pm_ids: user_deposit_pm_ids) }
       )
     end
 
-    { withdrawals: withdrawals, total: withdrawals.size }.to_json
+    {
+      withdrawals: withdrawals,
+      total: pagination[:total_count],
+      pagination: pagination,
+      returned_count: withdrawals.size
+    }.to_json
   end
 
   get '/api/withdrawals/:id' do
     w = Withdrawal.includes(:user, payout_legs: :payment_method).find(params[:id])
+    user_deposit_pm_ids = w.user ? w.user.deposits.pluck(:payment_method_id).to_set : Set.new
 
-    legs = w.payout_legs.order(id: :asc).map { |l| serialize_leg(l) }
+    legs = w.payout_legs.order(id: :asc).map { |l| serialize_leg(l, user_deposit_pm_ids: user_deposit_pm_ids) }
 
     # Related ledger entries
     withdrawal_ref = "withdrawal:#{w.id}"
@@ -348,12 +519,12 @@ class SoapPaymentsApi < Sinatra::Base
       }
     end
 
-    # Related webhook events
+    # Related webhook events via indexed SQL LIKE query rather than Ruby full-table scan
     ext_ids = legs.map { |l| l[:external_id] }.compact
     webhooks = if ext_ids.any?
-                 WebhookEvent.all.select do |we|
-                   ext_ids.any? { |eid| we.payload.to_s.include?(eid) }
-                 end.map do |we|
+                 conditions = ext_ids.map { 'payload LIKE ?' }.join(' OR ')
+                 values = ext_ids.map { |eid| "%#{eid}%" }
+                 WebhookEvent.where(conditions, *values).order(created_at: :desc).limit(20).map do |we|
                    {
                      id: we.id,
                      external_event_id: we.external_event_id,
@@ -408,7 +579,7 @@ class SoapPaymentsApi < Sinatra::Base
     end
 
     {
-      withdrawal: serialize_withdrawal(w).merge(
+      withdrawal: serialize_withdrawal(w, user_deposit_pm_ids: user_deposit_pm_ids).merge(
         legs: legs,
         request_fingerprint: w.request_fingerprint,
         ledger_entries: ledger_entries,
@@ -441,9 +612,9 @@ class SoapPaymentsApi < Sinatra::Base
     w = Withdrawal.includes(:payout_legs).find(params[:id])
     ext_ids = w.payout_legs.map(&:external_id).compact
     events = if ext_ids.any?
-               WebhookEvent.all.select do |we|
-                 ext_ids.any? { |eid| we.payload.to_s.include?(eid) }
-               end.map do |we|
+               conditions = ext_ids.map { 'payload LIKE ?' }.join(' OR ')
+               values = ext_ids.map { |eid| "%#{eid}%" }
+               WebhookEvent.where(conditions, *values).order(created_at: :desc).limit(20).map do |we|
                  {
                    id: we.id,
                    external_event_id: we.external_event_id,
@@ -459,8 +630,10 @@ class SoapPaymentsApi < Sinatra::Base
     { withdrawal_id: w.id, webhook_events: events }.to_json
   end
 
-  # Create Withdrawal via authoritative WithdrawalService
+  # Create Withdrawal via authoritative WithdrawalService with rate limiting
   post '/api/withdrawals' do
+    check_rate_limit!(limit: 60, window_seconds: 60)
+
     body = parsed_json_body
 
     user_id = body['user_id'] || body[:user_id]
@@ -475,7 +648,6 @@ class SoapPaymentsApi < Sinatra::Base
     idempotency_key = body['idempotency_key'] || body[:idempotency_key] || "demo_#{SecureRandom.hex(12)}"
 
     # Sandbox developer control: optionally configure MockPayoutProvider response
-    # Adheres to constraint 10 without modifying MockPayoutProvider
     mock_outcome = body['mock_provider_outcome'] || body[:mock_provider_outcome]
     if mock_outcome.present?
       case mock_outcome.to_s
@@ -507,11 +679,12 @@ class SoapPaymentsApi < Sinatra::Base
     if result.status == :ok
       withdrawal = Withdrawal.find_by(id: result.withdrawal_id)
       status 201
+      user_deposit_pm_ids = user.deposits.pluck(:payment_method_id).to_set
       {
         status: 'ok',
         withdrawal_id: result.withdrawal_id,
-        withdrawal: withdrawal ? serialize_withdrawal(withdrawal) : nil,
-        legs: result.legs.map { |l| serialize_leg(l) },
+        withdrawal: withdrawal ? serialize_withdrawal(withdrawal, user_deposit_pm_ids: user_deposit_pm_ids) : nil,
+        legs: result.legs.map { |l| serialize_leg(l, user_deposit_pm_ids: user_deposit_pm_ids) },
         idempotency_key: idempotency_key
       }.to_json
     else
@@ -537,16 +710,16 @@ class SoapPaymentsApi < Sinatra::Base
     end
   end
 
-  # Ledger view
+  # Ledger view - with pagination & SQL metrics
   get '/api/ledger' do
-    entries = LedgerEntry.includes(:user).order(created_at: :desc).limit(100)
+    scope = LedgerEntry.includes(:user).order(created_at: :desc)
+    records, pagination = paginate_scope(scope, default_size: 50)
 
-    users = User.all
-    total_balance = users.sum(:balance_cents)
-    total_ledger = LedgerEntry.sum(:amount_cents)
+    total_balance = User.sum(:balance_cents) || 0
+    total_ledger = LedgerEntry.sum(:amount_cents) || 0
 
-    total_debits = LedgerEntry.where('amount_cents < 0').sum(:amount_cents).abs
-    total_credits = LedgerEntry.where('amount_cents > 0').sum(:amount_cents)
+    total_debits = (LedgerEntry.where('amount_cents < 0').sum(:amount_cents) || 0).abs
+    total_credits = LedgerEntry.where('amount_cents > 0').sum(:amount_cents) || 0
 
     reconciled = (total_balance == total_ledger)
 
@@ -557,9 +730,9 @@ class SoapPaymentsApi < Sinatra::Base
         total_ledger_cents: total_ledger,
         total_debits_cents: total_debits,
         total_credits_cents: total_credits,
-        entries_count: LedgerEntry.count
+        entries_count: pagination[:total_count]
       },
-      entries: entries.map do |e|
+      entries: records.map do |e|
         {
           id: e.id,
           user_id: e.user_id,
@@ -569,13 +742,18 @@ class SoapPaymentsApi < Sinatra::Base
           reference: e.reference,
           created_at: e.created_at
         }
-      end
+      end,
+      pagination: pagination,
+      returned_count: records.size
     }.to_json
   end
 
-  # Webhooks list
+  # Webhooks list - with pagination
   get '/api/webhooks' do
-    events = WebhookEvent.order(created_at: :desc).limit(50).map do |we|
+    scope = WebhookEvent.order(created_at: :desc)
+    records, pagination = paginate_scope(scope, default_size: 50)
+
+    events = records.map do |we|
       parsed_payload = begin
         JSON.parse(we.payload)
       rescue StandardError
@@ -592,12 +770,23 @@ class SoapPaymentsApi < Sinatra::Base
       }
     end
 
-    { webhooks: events }.to_json
+    { webhooks: events, pagination: pagination, returned_count: events.size }.to_json
   end
 
-  # Ingest Webhook event
+  # Ingest Webhook event with rate limit, payload size limit, and signature verification
   post '/api/webhooks' do
-    body = parsed_json_body
+    check_rate_limit!(limit: 60, window_seconds: 60)
+
+    request.body.rewind
+    raw_body = request.body.read
+    verify_webhook_signature!(raw_body)
+
+    body = begin
+      JSON.parse(raw_body)
+    rescue StandardError
+      halt 400, { error: { code: 'malformed_json', message: 'Malformed JSON payload' } }.to_json
+    end
+
     handler = WithdrawalWebhookHandler.new
     handler.handle(body)
 
@@ -605,14 +794,13 @@ class SoapPaymentsApi < Sinatra::Base
     { status: 'received', message: 'Webhook event processed safely' }.to_json
   end
 
-  # Operational Audit Logs
+  # Activity Log / Derived Operations
   get '/api/audit-logs' do
-    # Synthesize operational audit logs from the database
-    audit_events = []
+    activity_events = []
 
-    Withdrawal.order(created_at: :desc).limit(20).each do |w|
-      audit_events << {
-        id: "audit_wd_#{w.id}",
+    Withdrawal.includes(:user).order(created_at: :desc).limit(20).each do |w|
+      activity_events << {
+        id: "activity_wd_#{w.id}",
         timestamp: w.created_at,
         actor: w.user&.email || "User ##{w.user_id}",
         action: 'withdrawal.created',
@@ -623,8 +811,8 @@ class SoapPaymentsApi < Sinatra::Base
     end
 
     WebhookEvent.order(created_at: :desc).limit(20).each do |we|
-      audit_events << {
-        id: "audit_wh_#{we.id}",
+      activity_events << {
+        id: "activity_wh_#{we.id}",
         timestamp: we.created_at,
         actor: 'Payout Provider Webhook',
         action: 'webhook.processed',
@@ -634,8 +822,13 @@ class SoapPaymentsApi < Sinatra::Base
       }
     end
 
-    audit_events.sort_by! { |e| e[:timestamp] }.reverse!
+    activity_events.sort_by! { |e| e[:timestamp] }.reverse!
 
-    { audit_logs: audit_events.take(30), environment: 'sandbox' }.to_json
+    {
+      audit_logs: activity_events.take(30),
+      activity_logs: activity_events.take(30),
+      log_type: 'derived_operational_activity',
+      environment: 'sandbox'
+    }.to_json
   end
 end

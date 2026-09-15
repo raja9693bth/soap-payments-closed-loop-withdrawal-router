@@ -1,6 +1,6 @@
 # SOAP Payments — Closed-Loop Withdrawal Router
 
-An enterprise-grade payments orchestration platform and operations console built with **Next.js 15**, **Ruby/Sinatra**, and **PostgreSQL**. Features deterministic Anti-Money Laundering (AML) closed-loop routing, pessimistic concurrency control, database-backed idempotency, an append-only double-entry ledger, and a real-time visual Withdrawal Routing Simulator.
+An enterprise-grade payments orchestration platform and operations console built with **Next.js 16 (App Router)**, **Ruby/Sinatra**, and **PostgreSQL**. Features deterministic Anti-Money Laundering (AML) closed-loop routing, pessimistic concurrency control, database-backed idempotency, an append-only double-entry ledger, and a real-time visual Withdrawal Routing Simulator.
 
 ---
 
@@ -8,9 +8,10 @@ An enterprise-grade payments orchestration platform and operations console built
 
 | Component | Target Environment | Local URL | Deployment Architecture |
 | :--- | :--- | :--- | :--- |
-| **Frontend Console** | Vercel (Next.js 15) | `http://localhost:3000` | Serverless Edge & Static Prerendering |
-| **Backend API Layer** | Render (Puma / Sinatra) | `http://localhost:4567` | Lightweight REST API Adapter |
-| **Domain Engine** | Ruby 3.3 / ActiveRecord | In-process | Core Orchestration & Invariants |
+| **Public Landing Page** | Vercel (Next.js 16) | `http://localhost:3000/` | Public architectural overview & live demo entrance |
+| **Frontend Operations Console** | Vercel (Next.js 16) | `http://localhost:3000/overview` | Responsive operations dashboard & simulator |
+| **Backend API Layer** | Render (Puma / Sinatra) | `http://localhost:4567` | Lightweight REST API Adapter with security guards |
+| **Domain Engine** | Ruby 3.3 / ActiveRecord | In-process | Core Orchestration & Financial Invariants |
 | **Database** | PostgreSQL | `localhost:5432` / `5433` | Append-Only Financial Ledger & Relational Models |
 
 ```mermaid
@@ -178,15 +179,15 @@ npm run build
 npm run start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser. The root `/` route automatically redirects to `/overview`.
+Open [http://localhost:3000](http://localhost:3000) in your browser to view the **Public Architectural Landing Page**, or navigate directly to [http://localhost:3000/overview](http://localhost:3000/overview) for the **Operations Console**.
 
 ---
 
 ## Automated Acceptance Matrix
 
-The core implementation is validated by a 33-example RSpec test suite covering domain requirements and HTTP contracts:
+The core implementation is thoroughly validated by a **47-example RSpec test suite** covering domain invariants, pessimistic concurrency, API contracts, security controls, pagination, and search:
 
-| Scenario | Invariant Tested | Status |
+| Scenario / Spec | Invariant Tested | Status |
 | :--- | :--- | :---: |
 | **R1** | Single deposit refunded FIFO to original instrument | PASS |
 | **R2** | Oldest deposit fully exhausted before next deposit is allocated | PASS |
@@ -204,14 +205,39 @@ The core implementation is validated by a 33-example RSpec test suite covering d
 | **R14** | Late failure webhook after settlement does not reverse funds | PASS |
 | **R15** | Mathematical reconciliation between balance and ledger deltas | PASS |
 | **R16** | Strict ledger immutability blocking update and delete | PASS |
-| **API 1** | `/api/health` returns healthy status and environment metadata | PASS |
-| **API 2** | `/api/dashboard` derives consistent metrics from database | PASS |
-| **API 3** | `POST /api/withdrawals` executes 4-leg closed-loop allocation | PASS |
-| **API 4** | `POST /api/withdrawals` returns 409 on idempotency conflict | PASS |
-| **API 5** | `POST /api/withdrawals` returns 422 on insufficient balance | PASS |
-| **API 6** | `POST /api/withdrawals` handles simulated provider failure and reversal | PASS |
-| **API 7** | `GET /api/ledger` verifies mathematical reconciliation | PASS |
-| **API 8** | `POST /api/webhooks` handles asynchronous callbacks safely | PASS |
+| **API 1–2** | `/api/health` returns healthy status, DB check, and environment metadata | PASS |
+| **API 3** | `/api/dashboard` derives consistent metrics from database | PASS |
+| **API 4** | `POST /api/withdrawals` executes multi-leg closed-loop allocation | PASS |
+| **API 5** | `POST /api/withdrawals` returns 409 on idempotency conflict | PASS |
+| **API 6** | `POST /api/withdrawals` returns 422 on insufficient balance | PASS |
+| **API 7** | `POST /api/withdrawals` handles simulated provider failure and reversal | PASS |
+| **API 8** | `GET /api/ledger` verifies mathematical reconciliation | PASS |
+| **API 9** | `POST /api/webhooks` handles asynchronous callbacks safely | PASS |
+| **API 10–12** | Real pagination support (`page`, `page_size`, `total_count`, `returned_count`) | PASS |
+| **API 13–15** | Server-side search (`?q=`) filtering withdrawals, users, and webhooks | PASS |
+| **API 16–17** | Webhook payload size enforcement (max 64KB, HTTP 413) | PASS |
+| **API 18–20** | Webhook HMAC-SHA256 signature verification and replay window (300s) | PASS |
+| **API 21–22** | Host authorization enforcement blocking unauthorized Host headers with 403 | PASS |
+
+---
+
+## Security & Architecture Controls
+
+- **Sandbox Authentication Boundary:** The API operates in an explicitly documented sandbox demonstration mode. No deceptive client-side JWT tokens or simulated fake logins are used. Sensitive endpoints and simulation controls are clearly labeled as sandbox-only.
+- **Webhook Ingestion Security:**
+  - **HMAC-SHA256 Verification:** Inbound provider webhooks verify signatures via constant-time comparison (`Rack::Utils.secure_compare`).
+  - **Replay Protection:** Rejects payloads timestamped older than 300 seconds.
+  - **Payload Size Limits:** Inbound requests larger than 64KB are rejected immediately with `413 Payload Too Large`.
+  - **Deduplication:** Guaranteed idempotent handling keyed on `external_event_id`.
+- **Host Authorization & CORS:**
+  - Strict host filtering permitting only designated deployment domains (`.render.com`, `.onrender.com`, `localhost`, `127.0.0.1`).
+  - Exact origin validation via `ALLOWED_ORIGINS` environment variable.
+- **Abuse Throttling:** Sliding-window in-memory rate limiting (60 req/min) across write endpoints.
+- **Database Query Optimizations:**
+  - Database-side SQL aggregations for dashboard metrics (`group(:state)`).
+  - Preloaded associations eliminating N+1 queries in user and leg serialization.
+  - Relational indexed queries for webhook lookups instead of in-memory string scanning.
+- **Activity Telemetry:** Audit trails are labeled as **Derived Operations Activity** to honestly distinguish synthesized transactional event logs from a dedicated physical audit appliance.
 
 ---
 
@@ -236,6 +262,6 @@ The core implementation is validated by a 33-example RSpec test suite covering d
 
 ---
 
-## Sandbox Disclaimer & Security Note
+## Sandbox Disclaimer & Compliance Statement
 
-> **Portfolio & Sandbox Notice:** This system is an engineering demonstration of payment orchestration and financial correctness. It is deployed in **Sandbox Mode** using simulated provider responses (`MockPayoutProvider`). It does not process real fiat currency, move customer funds, or interface with live banking payment rails. Sensitive instruments (PANs, tokens, secrets) are masked across all UI views and API payloads.
+> **Portfolio & Sandbox Notice:** This system is an engineering demonstration of closed-loop payment orchestration and financial correctness. It is deployed in **Sandbox Mode** using simulated provider responses (`MockPayoutProvider`). It does not process real fiat currency, move customer funds, or interface with live banking payment rails. Sensitive instruments (PANs, tokens, secrets) are masked across all UI views and API payloads. The codebase intentionally avoids overclaiming production certifications (e.g. PCI DSS), focusing instead on demonstrable architecture patterns, transaction safety, and mathematical rigor.

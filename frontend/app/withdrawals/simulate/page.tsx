@@ -81,7 +81,18 @@ export default function SimulatorPage() {
 
   const handleSimulate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedUserId || !selectedPayoutMethodId) return;
+    if (!selectedUserId) {
+      setError({ code: 'user_required', message: 'Please select a customer user account.' });
+      return;
+    }
+    if (!selectedPayoutMethodId) {
+      setError({ code: 'payout_method_required', message: 'Please select a default payout method for residual excess.' });
+      return;
+    }
+    if (!idempotencyKey.trim()) {
+      setError({ code: 'idempotency_key_required', message: 'Idempotency key is required to safeguard against duplicate payouts.' });
+      return;
+    }
 
     const parsedRupees = parseFloat(amountRupees);
     if (isNaN(parsedRupees) || parsedRupees <= 0) {
@@ -312,8 +323,8 @@ export default function SimulatorPage() {
               <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-semibold text-slate-700 text-[11px]">Provider Dispatch Simulation</span>
-                  <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded font-medium">
-                    Sandbox Control
+                  <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded font-bold uppercase tracking-wider">
+                    SANDBOX ONLY
                   </span>
                 </div>
                 <div className="grid grid-cols-3 gap-2">

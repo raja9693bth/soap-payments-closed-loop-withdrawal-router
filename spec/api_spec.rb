@@ -270,4 +270,114 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
       expect(last_response.status).to eq(403)
     end
   end
+
+  describe 'Pagination & Search Capabilities' do
+    let!(:user) { User.create!(email: 'searchable_user@soapdemo.com', balance_cents: 50_000) }
+    let!(:pm) { PaymentMethod.create!(user: user, asset_class: 'fiat_ach', external_token: 'bank_search_1') }
+
+    before do
+      5.times do |i|
+        w = Withdrawal.create!(
+          user: user,
+          amount_cents: 1_000 * (i + 1),
+          state: 'settled',
+          idempotency_key: "search_idem_#{i}",
+          request_fingerprint: Digest::SHA256.hexdigest("search_#{i}")
+        )
+        PayoutLeg.create!(
+          withdrawal: w,
+          payment_method: pm,
+          amount_cents: w.amount_cents,
+          state: 'settled'
+        )
+      end
+    end
+
+    it 'paginates withdrawals with real metadata' do
+      get '/api/withdrawals?page=1&page_size=2'
+      expect(last_response.status).to eq(200)
+
+      json = JSON.parse(last_response.body)
+      expect(json['pagination']).to be_present
+      expect(json['pagination']['page']).to eq(1)
+      expect(json['pagination']['page_size']).to eq(2)
+      expect(json['pagination']['total_count']).to be >= 5
+      expect(json['returned_count']).to eq(2)
+      expect(json['withdrawals'].size).to eq(2)
+    end
+
+    it 'performs server-side search by user email' do
+      get '/api/withdrawals?q=searchable_user'
+      expect(last_response.status).to eq(200)
+
+      json = JSON.parse(last_response.body)
+      expect(json['withdrawals']).to all(include('user_email' => 'searchable_user@soapdemo.com'))
+    end
+
+    it 'performs server-side search on users' do
+      get '/api/users?q=searchable'
+      expect(last_response.status).to eq(200)
+
+      json = JSON.parse(last_response.body)
+      expect(json['users'].size).to be >= 1
+      expect(json['users'].first['email']).to eq('searchable_user@soapdemo.com')
+    end
+  end
+
+  describe 'Webhook Security & Verification' do
+    let(:secret) { 'whsec_sandbox_demo_key_untrusted' }
+    let(:payload) { { event_id: 'evt_sec_1', event_type: 'payout.settled', data: { external_id: 'leg_sec_1', status: 'settled' } }.to_json }
+
+    it 'rejects payload exceeding 64KB with 413 Payload Too Large' do
+      huge_body = { data: 'x' * 70_000 }.to_json
+      post '/api/webhooks', huge_body, { 'CONTENT_TYPE' => 'application/json' }
+      expect(last_response.status).to eq(413)
+      json = JSON.parse(last_response.body)
+      expect(json['error']['code']).to eq('payload_too_large')
+    end
+
+    it 'rejects invalid HMAC signature with 401 Unauthorized when signature is provided' do
+      timestamp = Time.current.to_i.to_s
+      post '/api/webhooks', payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => 'bad_signature_hex',
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(401)
+      json = JSON.parse(last_response.body)
+      expect(json['error']['code']).to eq('invalid_webhook_signature')
+    end
+
+    it 'rejects expired timestamp (+/- 5 minutes) with 401 Unauthorized' do
+      timestamp = (Time.current.to_i - 600).to_s
+      signature = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{payload}")
+      post '/api/webhooks', payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => signature,
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(401)
+      json = JSON.parse(last_response.body)
+      expect(json['error']['code']).to eq('webhook_timestamp_expired')
+    end
+
+    it 'accepts verified HMAC signature with valid timestamp' do
+      timestamp = Time.current.to_i.to_s
+      signature = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{payload}")
+      post '/api/webhooks', payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => signature,
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(200)
+      expect(last_response.headers['X-Webhook-Auth']).to eq('hmac-verified')
+    end
+  end
+
+  describe 'Host Authorization Enforcement' do
+    it 'blocks requests from unauthorized Host headers with 403 Forbidden' do
+      get '/api/health', {}, { 'HTTP_HOST' => 'untrusted-malicious-domain.com' }
+      expect(last_response.status).to eq(403)
+    end
+  end
 end
