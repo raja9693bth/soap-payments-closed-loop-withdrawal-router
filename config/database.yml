@@ -7,7 +7,7 @@ default: &default
   pool: 10
   host: <%= ENV.fetch('SOAP_DB_HOST', 'localhost') %>
   port: <%= ENV.fetch('SOAP_DB_PORT', '5432') %>
-  username: <%= ENV.fetch('SOAP_DB_USER', ENV['USER']) %>
+  username: <%= ENV.fetch('SOAP_DB_USER', ENV['USER'] || 'postgres') %>
   password: <%= ENV['SOAP_DB_PASSWORD'] %>
 
 development:

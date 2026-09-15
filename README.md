@@ -1,88 +1,190 @@
-# Soap Payments — Closed-Loop Withdrawal Router
+# SOAP Payments — Closed-Loop Withdrawal Router
 
-A Ruby on Rails payment orchestration service designed to process user withdrawals with deterministic Anti-Money Laundering (AML) closed-loop routing, pessimistic concurrency control, database-backed idempotency, append-only double-entry ledgering, and replay-safe asynchronous settlement.
-
----
-
-## Overview & Domain Problem
-
-In financial payment platforms, handling fund withdrawals requires strict adherence to compliance rules and financial invariants:
-1. **AML Closed-Loop Compliance:** Payouts must first refund prior deposits back to their originating payment instruments in FIFO order (by settlement timestamp) before any residual excess is routed to a default payout method.
-2. **Asset Family Isolation:** Crossing asset classes (e.g., fiat card/ACH vs. cryptocurrency) is explicitly refused to prevent unauthorized currency conversions or routing anomalies.
-3. **Double-Spend & Overdraft Prevention:** Concurrent withdrawal requests must serialize on the user's balance row to ensure a user can never withdraw more than their available balance.
-4. **Idempotency & Replay Safety:** Retried API calls with the same key and payload return identical cached responses without duplicate financial side effects, while mismatched payloads trigger a `409 Conflict`.
-5. **Reconciliation & Ledger Integrity:** All money movement is recorded as signed deltas in an append-only, immutable ledger where `opening_balance + sum(ledger_deltas) == current_balance`.
-6. **Ambiguous Settlement:** Network timeouts and provider `:unknown` responses remain non-terminal without premature reversal or automatic duplicate retries. Definite failures trigger an exact-once compensating ledger reversal.
+An enterprise-grade payments orchestration platform and operations console built with **Next.js 15**, **Ruby/Sinatra**, and **PostgreSQL**. Features deterministic Anti-Money Laundering (AML) closed-loop routing, pessimistic concurrency control, database-backed idempotency, an append-only double-entry ledger, and a real-time visual Withdrawal Routing Simulator.
 
 ---
 
-## Architectural Components
+## Live Demo & Architecture
 
-The solution is structured as a modular service layer built on ActiveRecord and PostgreSQL:
+| Component | Target Environment | Local URL | Deployment Architecture |
+| :--- | :--- | :--- | :--- |
+| **Frontend Console** | Vercel (Next.js 15) | `http://localhost:3000` | Serverless Edge & Static Prerendering |
+| **Backend API Layer** | Render (Puma / Sinatra) | `http://localhost:4567` | Lightweight REST API Adapter |
+| **Domain Engine** | Ruby 3.3 / ActiveRecord | In-process | Core Orchestration & Invariants |
+| **Database** | PostgreSQL | `localhost:5432` / `5433` | Append-Only Financial Ledger & Relational Models |
 
+```mermaid
+flowchart LR
+    subgraph Client ["Frontend Console (Vercel)"]
+        UI["Next.js Operations Dashboard"]
+        Sim["Withdrawal Routing Simulator"]
+    end
+
+    subgraph API ["Backend API Layer (Render)"]
+        Sinatra["Sinatra REST Controller"]
+        CORS["Rack::Cors & Error Handlers"]
+    end
+
+    subgraph Core ["Authoritative Payment Engine"]
+        WS["WithdrawalService"]
+        CLR["ClosedLoopResolver"]
+        PD["PayoutDispatcher"]
+        WWH["WithdrawalWebhookHandler"]
+    end
+
+    subgraph DB ["PostgreSQL Database"]
+        Ledger[("ledger_entries (Append-Only)")]
+        Users[("users (Row Locks)")]
+        Deps[("deposits (Unrefunded Principal)")]
+        Withdrawals[("withdrawals & payout_legs")]
+        Idem[("idempotency_keys")]
+    end
+
+    UI --> Sinatra
+    Sim --> Sinatra
+    Sinatra --> WS
+    WS --> CLR
+    WS --> PD
+    WS --> Users
+    WS --> Deps
+    WS --> Withdrawals
+    WS --> Ledger
+    WS --> Idem
+    WWH --> Withdrawals
+    WWH --> Ledger
 ```
-app/
-├── models/
-│   ├── deposit.rb               # Tracks unrefunded_principal_cents and settled_at
-│   ├── idempotency_key.rb       # Stores SHA-256 request fingerprints and cached responses
-│   ├── ledger_entry.rb          # Immutable, append-only audit trail (update/delete blocked)
-│   ├── payment_method.rb        # Tokenized instruments with asset_class (fiat_card, fiat_ach, crypto)
-│   ├── payout_leg.rb            # Individual legs comprising a withdrawal (pending, submitted, settled, failed)
-│   ├── user.rb                  # Balance owner with balance_cents
-│   ├── webhook_event.rb         # Asynchronous provider callbacks deduplicated by external_event_id
-│   └── withdrawal.rb            # Aggregate withdrawal entity
-└── services/
-    ├── withdrawal_service.rb          # Main entry point: validation, locking, transactions, idempotency
-    ├── closed_loop_resolver.rb        # Deterministic FIFO allocation and asset-family validation
-    ├── payout_dispatcher.rb           # Decoupled provider dispatch and synchronous failure compensation
-    ├── withdrawal_webhook_handler.rb  # Replay-safe async settlement and late failure protection
-    └── mock_payout_provider.rb        # Simulated provider interface
+
+---
+
+## Core Payment Invariants
+
+The platform strictly enforces the following financial and operational rules:
+
+1. **FIFO Closed-Loop Routing:** Payouts first refund prior deposits back to their originating payment instruments in FIFO order (by settlement timestamp) before any residual excess is routed to a default payout method.
+2. **Asset Family Isolation:** Crossing asset families (e.g. fiat card/ACH vs. cryptocurrency) is refused to prevent unauthorized currency conversions or routing anomalies.
+3. **Pessimistic Concurrency Control:** Withdrawals acquire a database row lock (`FOR UPDATE`) on the user balance record, preventing balance overdrafts under concurrent requests.
+4. **Database-Backed Idempotency:** Requests with the same key and payload return cached results without duplicate side effects. Mismatched payloads return `409 Conflict`.
+5. **Decoupled Payout Dispatch:** External network calls to payout providers occur **outside** the database transaction lock, protecting DB connection pools from third-party latency.
+6. **Provider Failure Compensation:** Definite payout failures execute an exact-once compensating ledger reversal, restoring the user's balance.
+7. **Ambiguous Outcome Safety:** Provider timeouts or `:unknown` outcomes remain non-terminal without automatic retry or premature reversal, awaiting async webhook reconciliation.
+8. **Replay-Safe Webhooks:** Inbound webhook deliveries deduplicate on `external_event_id`. Duplicate callbacks exit as idempotent no-ops.
+9. **Late Failure Protection:** If a payout leg is already settled, subsequent late failure callbacks are safely ignored without reversing funds.
+10. **Immutable Append-Only Ledger:** All balance movements write signed deltas (`amount_cents`) to `ledger_entries`. Updates and deletions are blocked at the model layer:
+    $$\text{User Balance} = \sum(\text{Ledger Entry Deltas})$$
+
+---
+
+## Frontend Operations Console
+
+The frontend dashboard provides a light-theme, enterprise fintech operations experience (inspired by Stripe, Mercury, and Brex):
+
+- **Overview (`/overview`):**
+  - KPI Cards: Total Withdrawal Volume, Total Withdrawals, Success Rate, and Ledger Balance verification.
+  - 7-Day Withdrawal Trends bar chart with hover tooltips and outcome distribution donut.
+  - Live system component health monitor (Router, Dispatcher, Ledger, Webhook, Database).
+  - Recent routing operations feed.
+- **Withdrawal Routing Simulator (`/withdrawals/simulate`):**
+  - Interactive test harness for closed-loop FIFO routing.
+  - Customer selection (e.g. Aarav Mehta with 3 card deposits and 1 ACH payout method).
+  - Configurable amount with integer minor unit validation.
+  - Visual closed-loop routing diagram connecting original instruments to allocated payout legs.
+  - API Request Inspector with copyable `curl` and JSON payloads.
+  - Developer sandbox controls to simulate provider success, failure, and unknown outcomes.
+- **Withdrawal Detail (`/withdrawals/:id`):**
+  - Two-column enterprise view: Operational details (Legs, Event Timeline, Webhooks, Ledger entries) and static metadata.
+- **Append-Only Ledger (`/ledger`):**
+  - Live mathematical reconciliation banner verifying that total account balances equal the net sum of ledger transactions.
+  - Signed transaction audit trail (red `-` for debits, green `+` for credits/reversals).
+- **Webhook Monitor (`/webhooks`):**
+  - Inbound event inbox with payload inspector, related leg references, and replay-safe deduplication badges.
+  - Interactive test webhook emitter.
+- **Developer API Explorer (`/developers`):**
+  - Interactive "Try Request" console executing live requests against the backend.
+  - Complete endpoint documentation with HTTP status codes (`200`, `201`, `400`, `403`, `409`, `422`, `500`).
+- **Command Palette (`Cmd+K` / `Ctrl+K`):**
+  - Instant keyboard navigation across all operational entities and pages.
+
+---
+
+## Backend API Specification
+
+All endpoints return standard JSON envelopes. Error responses follow a uniform shape:
+```json
+{
+  "error": {
+    "code": "insufficient_funds",
+    "message": "Insufficient funds"
+  }
+}
 ```
 
----
-
-## Key Invariants & Design Decisions
-
-### 1. Orchestration & Concurrency (`WithdrawalService`)
-- Validates user instance, integer cents (`amount_cents > 0`), non-empty idempotency key, and default payout method ownership.
-- Checks `IdempotencyKey` via SHA-256 fingerprinting. Identical requests return cached results; mismatched bodies return `:idempotency_conflict`.
-- Initiates an `ActiveRecord::Base.transaction` and acquires a pessimistic row lock: `User.lock("FOR UPDATE").find(user.id)`.
-- Verifies balance sufficiency under lock; generates closed-loop plan; mutates balance; creates withdrawal; writes ledger debit (`-amount_cents`); creates payout legs; and decrements `Deposit#unrefunded_principal_cents`.
-- **Decoupled Provider Dispatch:** External network calls (`@payout_provider.dispatch`) are executed **outside** the database transaction, eliminating connection pool exhaustion and long-held row locks during third-party latency.
-
-### 2. Closed-Loop Routing Algorithm (`ClosedLoopResolver`)
-- Filters candidate deposits for the user where `unrefunded_principal_cents > 0`.
-- Acquires row locks on candidate deposits in deterministic order (`settled_at ASC, id ASC`).
-- Categorizes deposits into eligible vs. conflicting asset families (`:fiat` vs. `:crypto`).
-- **Cross-Asset Refusal:** If a withdrawal requires funds beyond eligible deposits and the user holds unrefunded deposits in a conflicting asset family, the resolver raises `CrossAssetError`, halting the withdrawal.
-- Allocates funds FIFO across eligible deposits; routes any remaining residual to the user's default payout method.
-
-### 3. Decoupled Dispatch & Exact-Once Compensation (`PayoutDispatcher`)
-- Calls provider with a deterministic composite idempotency key: `#{withdrawal.idempotency_key}:leg:#{leg.id}`.
-- Normalizes provider responses:
-  - `:submitted`: Leg state updated to `submitted` (non-terminal).
-  - `:failed`: Leg state updated to `failed`; immediately triggers `compensate_failed_leg!` restoring user balance and appending a `withdrawal_reversal` ledger entry with a unique reference `"payout_leg:#{leg.id}:reversal"`.
-  - `:unknown` or timeout: Leg state updated to `unknown` (non-terminal). No balance reversal and no automatic retry.
-
-### 4. Replay-Safe Webhooks (`WithdrawalWebhookHandler`)
-- Deduplicates inbound events via `WebhookEvent.create_or_find_by!(external_event_id:)`.
-- Replayed events (already having `processed_at`) exit immediately as safe no-ops.
-- **Guarded Transitions:** Prevents invalid state regressions from terminal states (`settled`, `failed`).
-- **Late Failure Guard:** If a leg is already `settled`, a subsequent late failure webhook is safely ignored without reversing funds.
-- Aggregates overall `Withdrawal` state to `settled` once all constituent payout legs have settled.
-
-### 5. Append-Only Ledger (`LedgerEntry`)
-- Disables automatic timestamp mutation (`self.record_timestamps = false`).
-- Overrides `#readonly?`, `#delete`, `before_update`, and `before_destroy` to raise `ActiveRecord::ReadOnlyRecord`.
-- Debits are stored as negative amounts; reversals and deposits are stored as positive amounts.
-- Mathematically guarantees:
-  $$\text{Opening Balance} + \sum(\text{Ledger Entry Deltas}) = \text{Current Balance}$$
+| Method | Endpoint | Description | Status Codes |
+| :--- | :--- | :--- | :---: |
+| `GET` | `/api/health` | Service health and database connection status | `200` |
+| `GET` | `/api/dashboard` | Aggregated KPIs, 7-day trends, outcome distribution | `200` |
+| `GET` | `/api/users` | List of customers, balances, and instrument counts | `200` |
+| `GET` | `/api/users/:id` | Customer profile, deposits, and ledger summary | `200`, `404` |
+| `GET` | `/api/payment-methods` | Masked payment instruments list | `200` |
+| `GET` | `/api/withdrawals` | Filterable withdrawals list | `200` |
+| `GET` | `/api/withdrawals/:id` | Withdrawal details, payout legs, and event timeline | `200`, `404` |
+| `GET` | `/api/withdrawals/:id/ledger` | Related ledger audit trail entries for withdrawal | `200`, `404` |
+| `GET` | `/api/withdrawals/:id/webhooks` | Related provider webhook events for withdrawal legs | `200`, `404` |
+| `POST` | `/api/withdrawals` | Orchestrates a withdrawal via `WithdrawalService` | `201`, `400`, `403`, `409`, `422` |
+| `GET` | `/api/ledger` | Immutable financial ledger and reconciliation status | `200` |
+| `GET` | `/api/webhooks` | Webhook delivery history and replay-safety state | `200` |
+| `POST` | `/api/webhooks` | Ingests and processes provider callbacks | `200` |
+| `GET` | `/api/audit-logs` | Operational activity trail | `200` |
 
 ---
 
-## Verification & Acceptance Suite
+## Local Development Runbook
 
-The implementation is verified by a 25-example RSpec test suite covering the full R1–R16 acceptance matrix:
+### Prerequisites
+- **Ruby:** 3.3.x
+- **Node.js:** 20.x or 24.x
+- **PostgreSQL:** 15+
+- **Bundler:** 2.5+
+
+### 1. Database & Backend Setup
+```bash
+# Install Ruby gems
+bundle install
+
+# Run database migrations
+bundle exec rake db:migrate
+
+# Seed deterministic sandbox data
+bundle exec rake db:seed
+
+# Run the complete test suite (25 domain specs + 8 API specs)
+bundle exec rspec
+
+# Start the Puma API server on port 4567
+bundle exec puma -p 4567 config.ru
+```
+
+### 2. Frontend Setup
+```bash
+cd frontend
+
+# Install Node dependencies
+npm install
+
+# Start Next.js development server on port 3000
+npm run dev
+
+# Or build and run the production bundle
+npm run build
+npm run start
+```
+
+Open [http://localhost:3000](http://localhost:3000) in your browser. The root `/` route automatically redirects to `/overview`.
+
+---
+
+## Automated Acceptance Matrix
+
+The core implementation is validated by a 33-example RSpec test suite covering domain requirements and HTTP contracts:
 
 | Scenario | Invariant Tested | Status |
 | :--- | :--- | :---: |
@@ -102,41 +204,38 @@ The implementation is verified by a 25-example RSpec test suite covering the ful
 | **R14** | Late failure webhook after settlement does not reverse funds | PASS |
 | **R15** | Mathematical reconciliation between balance and ledger deltas | PASS |
 | **R16** | Strict ledger immutability blocking update and delete | PASS |
+| **API 1** | `/api/health` returns healthy status and environment metadata | PASS |
+| **API 2** | `/api/dashboard` derives consistent metrics from database | PASS |
+| **API 3** | `POST /api/withdrawals` executes 4-leg closed-loop allocation | PASS |
+| **API 4** | `POST /api/withdrawals` returns 409 on idempotency conflict | PASS |
+| **API 5** | `POST /api/withdrawals` returns 422 on insufficient balance | PASS |
+| **API 6** | `POST /api/withdrawals` handles simulated provider failure and reversal | PASS |
+| **API 7** | `GET /api/ledger` verifies mathematical reconciliation | PASS |
+| **API 8** | `POST /api/webhooks` handles asynchronous callbacks safely | PASS |
 
 ---
 
-## Local Setup & Testing
+## Deployment Guide
 
-### Prerequisites
-- **Ruby:** 3.3.x (managed via `mise`, `asdf`, or `rbenv` per `.tool-versions`)
-- **PostgreSQL:** 15+
-- **Bundler:** 2.5+
+### Vercel (Frontend)
+1. Push the repository to GitHub.
+2. In Vercel, import the repository and set **Root Directory** to `frontend`.
+3. Configure the environment variable:
+   - `NEXT_PUBLIC_API_BASE_URL`: The URL of your deployed Render API (e.g. `https://soap-payments-api.onrender.com`).
+4. Deploy.
 
-### Installation & Execution
-```bash
-# 1. Install dependencies
-bundle install
-
-# 2. Configure database environment (if different from default localhost:5432)
-export SOAP_DB_USER="postgres"
-export SOAP_DB_PORT="5432"
-export SOAP_DB_NAME="soap_test"
-
-# 3. Migrate test database
-bundle exec rake db:migrate
-
-# 4. Run full test suite
-bundle exec rspec
-```
+### Render (Ruby API & PostgreSQL)
+1. In Render, create a new **Web Service** connected to the repository.
+2. Use the provided `render.yaml` or configure:
+   - **Environment:** `Ruby`
+   - **Build Command:** `bundle install && bundle exec rake db:migrate db:seed`
+   - **Start Command:** `bundle exec puma -p $PORT -e production config.ru`
+3. Attach a Render PostgreSQL instance (`DATABASE_URL`).
+4. Set environment variable:
+   - `ALLOWED_ORIGINS`: Your Vercel frontend URL (e.g. `https://soap-payments.vercel.app`).
 
 ---
 
-## Scope & Production Hardening Roadmap
+## Sandbox Disclaimer & Security Note
 
-> **Note on Scope:** This repository is a technical portfolio implementation of a payments orchestration service. It is designed to demonstrate financial software correctness, concurrency safety, and transaction integrity. It does not constitute a certified production deployment or licensed money-transmission service.
-
-### Recommended Production Enhancements
-1. **Cryptographic Webhook Verification:** Implement HMAC-SHA256 signature verification on incoming webhook payloads against a shared provider secret.
-2. **Transactional Outbox Worker:** Decouple payout leg dispatch and webhook processing into an asynchronous job pipeline (e.g., Solid Queue or Sidekiq) backed by an outbox table.
-3. **Observability & Telemetry:** Instrument OpenTelemetry spans, structured JSON logging with correlation IDs, and Prometheus metrics for payout dispatch latency, failure rates, and reversal frequency.
-4. **Database Triggers:** Supplement application-level ledger immutability with PostgreSQL database-level `BEFORE UPDATE OR DELETE` triggers.
+> **Portfolio & Sandbox Notice:** This system is an engineering demonstration of payment orchestration and financial correctness. It is deployed in **Sandbox Mode** using simulated provider responses (`MockPayoutProvider`). It does not process real fiat currency, move customer funds, or interface with live banking payment rails. Sensitive instruments (PANs, tokens, secrets) are masked across all UI views and API payloads.
