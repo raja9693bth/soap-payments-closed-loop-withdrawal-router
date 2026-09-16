@@ -64,29 +64,29 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         {connState.state === 'waking' && (
           <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-amber-50 text-amber-800 border border-amber-300 whitespace-nowrap shadow-2xs">
             <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
-            <span className="hidden sm:inline">Waking Sandbox…</span>
+            <span className="hidden sm:inline">Waking Sandbox Backend…</span>
             <span className="sm:hidden">Waking…</span>
           </div>
         )}
         {connState.state === 'connecting' && (
           <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 whitespace-nowrap">
             <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
-            <span className="hidden sm:inline">Connecting…</span>
-            <span className="sm:hidden">Connecting</span>
+            <span className="hidden sm:inline">Connecting to Sandbox Backend…</span>
+            <span className="sm:hidden">Connecting…</span>
           </div>
         )}
         {connState.state === 'connected' && (
           <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-emerald-50 text-emerald-800 border border-emerald-200 whitespace-nowrap">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-            <span className="hidden sm:inline">Sandbox Connected</span>
-            <span className="sm:hidden">Sandbox</span>
+            <span className="hidden sm:inline">Sandbox Online</span>
+            <span className="sm:hidden">Online</span>
           </div>
         )}
         {connState.state === 'unavailable' && (
           <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200 whitespace-nowrap">
             <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />
-            <span className="hidden sm:inline">Sandbox Offline</span>
-            <span className="sm:hidden">Offline</span>
+            <span className="hidden sm:inline">Backend Unavailable</span>
+            <span className="sm:hidden">Unavailable</span>
           </div>
         )}
 

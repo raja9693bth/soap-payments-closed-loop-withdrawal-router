@@ -79,14 +79,16 @@ type StateListener = (event: ConnectionStateEvent) => void;
 class ApiClient {
   private baseUrl: string;
   private listeners: Set<StateListener> = new Set();
-  private currentState: BackendConnectionState = 'connected';
+  private currentState: BackendConnectionState = 'connecting';
   private currentEvent: ConnectionStateEvent = {
-    state: 'connected',
-    message: 'Connected to backend',
+    state: 'connecting',
+    message: 'Connecting to sandbox backend…',
     attempt: 1,
-    maxAttempts: 2,
+    maxAttempts: 1,
     elapsedMs: 0,
   };
+  private inFlightWakePromise: Promise<boolean> | null = null;
+  private inFlightRequestsCount = 0;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
@@ -104,7 +106,7 @@ class ApiClient {
     };
   }
 
-  private notify(state: BackendConnectionState, message: string, attempt = 1, maxAttempts = 2, elapsedMs = 0) {
+  private notify(state: BackendConnectionState, message: string, attempt = 1, maxAttempts = 1, elapsedMs = 0) {
     this.currentState = state;
     this.currentEvent = { state, message, attempt, maxAttempts, elapsedMs };
     this.listeners.forEach((l) => {
@@ -118,6 +120,93 @@ class ApiClient {
 
   getConnectionState(): ConnectionStateEvent {
     return this.currentEvent;
+  }
+
+  /**
+   * Bounded readiness / wake probe targeting GET /api/health.
+   * Runs only when needed (cold-start / 502/503/timeout).
+   * Validates: HTTP 200, status === "ok", database === "connected".
+   * Multiple concurrent callers share the EXACT same in-flight probe promise (no request storm).
+   * Automatically stops immediately when connected or when the recovery window (~70s) expires.
+   */
+  async wakeBackend(signal?: AbortSignal | null): Promise<boolean> {
+    if (this.inFlightWakePromise) {
+      return this.inFlightWakePromise;
+    }
+
+    if (this.currentState === 'connected') {
+      return true;
+    }
+
+    this.inFlightWakePromise = (async () => {
+      const cleanEndpoint = '/api/health';
+      const healthUrl = this.baseUrl ? `${this.baseUrl}${cleanEndpoint}` : cleanEndpoint;
+      const wakeStartTime = Date.now();
+      const maxRecoveryWindowMs = 70000; // 70s maximum ceiling
+      const probeTimeoutMs = 8000;
+      let attempt = 0;
+
+      this.notify('waking', 'Waking Sandbox Backend…', 1, 10, 0);
+
+      while (Date.now() - wakeStartTime < maxRecoveryWindowMs) {
+        if (signal?.aborted) {
+          return false;
+        }
+
+        attempt++;
+        const elapsed = Date.now() - wakeStartTime;
+        this.notify('waking', 'Waking Sandbox Backend…', attempt, 10, elapsed);
+
+        const probeController = new AbortController();
+        const probeTimeout = setTimeout(() => probeController.abort(), probeTimeoutMs);
+
+        const onParentAbort = () => probeController.abort();
+        if (signal) {
+          signal.addEventListener('abort', onParentAbort);
+        }
+
+        try {
+          const resp = await fetch(healthUrl, {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            cache: 'no-store',
+            signal: probeController.signal,
+          });
+
+          clearTimeout(probeTimeout);
+          if (signal) {
+            signal.removeEventListener('abort', onParentAbort);
+          }
+
+          if (resp.ok) {
+            const data = await resp.json().catch(() => null);
+            if (data && data.status === 'ok' && data.database === 'connected') {
+              this.notify('connected', 'Sandbox Online', attempt, 10, Date.now() - wakeStartTime);
+              return true;
+            }
+          }
+        } catch {
+          clearTimeout(probeTimeout);
+          if (signal) {
+            signal.removeEventListener('abort', onParentAbort);
+          }
+          if (signal?.aborted) {
+            return false;
+          }
+        }
+
+        // Bounded sleep with progressive backoff (3s to 5s)
+        const sleepMs = Math.min(3000 + attempt * 500, 5000);
+        await new Promise((r) => setTimeout(r, sleepMs));
+      }
+
+      this.notify('unavailable', 'Backend Unavailable', attempt, 10, Date.now() - wakeStartTime);
+      return false;
+    })().finally(() => {
+      this.inFlightWakePromise = null;
+    });
+
+    return this.inFlightWakePromise;
   }
 
   private mapDomainError(code: string, rawMessage: string, status: number): ApiErrorDetail {
@@ -179,6 +268,7 @@ class ApiClient {
 
     // Guard against unconfigured API base in production
     if (isProduction && !this.baseUrl) {
+      this.notify('unavailable', 'Backend configuration missing', 1, 1, 0);
       throw new SoapApiError({
         code: 'backend_unconfigured',
         status: 503,
@@ -189,157 +279,203 @@ class ApiClient {
 
     const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
     const url = this.baseUrl ? `${this.baseUrl}${cleanEndpoint}` : cleanEndpoint;
-
     const method = (options.method || 'GET').toUpperCase();
-    // Allow retries for GET/HEAD, or POST /api/withdrawals which has database-backed idempotency protection
-    const isIdempotent = method === 'GET' || method === 'HEAD' || endpoint.includes('/api/withdrawals');
-    const maxAttempts = isIdempotent ? 2 : 1;
 
-    let lastError: unknown = null;
+    // CRITICAL FINTECH GUARDRAIL:
+    // Only GET and HEAD read operations may use bounded recovery for cold boot.
+    // POST/withdrawal operations are NEVER automatically retried to guarantee idempotency and financial safety.
+    const isGetOrHead = method === 'GET' || method === 'HEAD';
+
     const requestStartTime = Date.now();
+    this.inFlightRequestsCount++;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const elapsed = Date.now() - requestStartTime;
-      if (attempt === 1) {
-        this.notify('connecting', 'Connecting to sandbox backend…', attempt, maxAttempts, elapsed);
-      } else {
-        this.notify('waking', 'Waking sandbox service… (Render free tier cold start)', attempt, maxAttempts, elapsed);
-      }
+    // If currently not connected or waking, notify connecting
+    if (this.currentState !== 'waking' && this.currentState !== 'connected') {
+      this.notify('connecting', 'Connecting to sandbox backend…', 1, 1, 0);
+    }
 
-      // If waiting longer than 4.5s on attempt 1, proactively transition to "waking"
-      const wakingTimer = setTimeout(() => {
+    // Proactive waking signal: if initial GET request takes > 3.5s, switch UI state to 'waking'
+    let wakingTimer: NodeJS.Timeout | null = null;
+    if (isGetOrHead && this.currentState !== 'connected') {
+      wakingTimer = setTimeout(() => {
         if (this.currentState === 'connecting') {
-          this.notify('waking', 'Waking sandbox service… (Render free tier cold start)', attempt, maxAttempts, Date.now() - requestStartTime);
+          this.notify('waking', 'Waking Sandbox Backend…', 1, 1, Date.now() - requestStartTime);
         }
-      }, 4500);
+      }, 3500);
+    }
 
-      const controller = new AbortController();
-      // Generous 45s timeout to accommodate Render cold boot
-      const timeoutMs = 45000;
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const executeFetch = async (targetSignal?: AbortSignal): Promise<{ ok: boolean; status: number; data: unknown }> => {
+      const headers = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...options.headers,
+      };
 
-      // Support external signal cancellation
-      let abortListener: (() => void) | null = null;
+      const response = await fetch(url, {
+        ...options,
+        headers,
+        cache: 'no-store',
+        signal: targetSignal,
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      const isJson = contentType.includes('application/json');
+      const data = isJson ? await response.json().catch(() => null) : await response.text().catch(() => '');
+
+      return { ok: response.ok, status: response.status, data };
+    };
+
+    try {
+      // 1. Initial attempt with a generous 45s timeout to allow Render proxy buffering during cold spin-up
+      const initialController = new AbortController();
+      const initialTimeout = setTimeout(() => initialController.abort(), 45000);
+
+      const onExternalAbort = () => initialController.abort();
       if (options.signal) {
-        abortListener = () => controller.abort();
-        options.signal.addEventListener('abort', abortListener);
+        options.signal.addEventListener('abort', onExternalAbort);
       }
+
+      let fetchResult: { ok: boolean; status: number; data: unknown };
+      let transientError: unknown = null;
 
       try {
-        const headers = {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          ...options.headers,
-        };
-
-        const response = await fetch(url, {
-          ...options,
-          headers,
-          cache: 'no-store',
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-        clearTimeout(wakingTimer);
-        if (options.signal && abortListener) {
-          options.signal.removeEventListener('abort', abortListener);
-        }
-
-        const contentType = response.headers.get('content-type') || '';
-        const isJson = contentType.includes('application/json');
-        const data = isJson ? await response.json() : await response.text();
-
-        if (!response.ok) {
-          // If server returned 502/503/504 Bad Gateway / Service Unavailable during boot, retry once if idempotent
-          if ([502, 503, 504].includes(response.status) && attempt < maxAttempts) {
-            this.notify('waking', 'Waking sandbox service… (Retrying connection)', attempt, maxAttempts, Date.now() - requestStartTime);
-            await new Promise((r) => setTimeout(r, 2500));
-            continue;
-          }
-
-          const errorObj = typeof data === 'object' && data !== null && 'error' in data ? (data as { error: { code?: string; message?: string } }).error : null;
-          const code = errorObj?.code || `http_${response.status}`;
-          const message = errorObj?.message || (typeof data === 'string' ? data : `HTTP ${response.status} error`);
-          throw new SoapApiError(this.mapDomainError(code, message, response.status));
-        }
-
-        this.notify('connected', 'Connected', attempt, maxAttempts, Date.now() - requestStartTime);
-        return data as T;
+        fetchResult = await executeFetch(initialController.signal);
       } catch (err: unknown) {
-        clearTimeout(timeoutId);
-        clearTimeout(wakingTimer);
-        if (options.signal && abortListener) {
-          options.signal.removeEventListener('abort', abortListener);
-        }
-
-        // If caller explicitly aborted via external signal, do not retry
-        if (options.signal?.aborted) {
-          throw err;
-        }
-
-        // Domain errors from backend (e.g. 409 conflict, 422 insufficient funds) are non-retryable
-        if (err instanceof SoapApiError) {
-          throw err;
-        }
-
-        lastError = err;
-
-        // If this was an AbortError or network failure (e.g. connection refused/reset during boot)
-        // and we have attempts remaining, backoff and retry
-        if (attempt < maxAttempts) {
-          this.notify('waking', 'Waking sandbox service… (Retrying after connection drop)', attempt, maxAttempts, Date.now() - requestStartTime);
-          await new Promise((r) => setTimeout(r, 2500));
-          continue;
+        transientError = err;
+        fetchResult = { ok: false, status: 0, data: null };
+      } finally {
+        clearTimeout(initialTimeout);
+        if (wakingTimer) clearTimeout(wakingTimer);
+        if (options.signal) {
+          options.signal.removeEventListener('abort', onExternalAbort);
         }
       }
-    }
 
-    // Retries exhausted
-    this.notify('unavailable', 'Backend unavailable', maxAttempts, maxAttempts, Date.now() - requestStartTime);
+      // If caller aborted, rethrow immediately
+      if (options.signal?.aborted) {
+        throw new SoapApiError({
+          code: 'request_aborted',
+          status: 499,
+          message: 'Request was cancelled.',
+        });
+      }
 
-    if (lastError && (lastError as Error).name === 'AbortError') {
+      // If initial request succeeded
+      if (fetchResult.ok) {
+        this.notify('connected', 'Sandbox Online', 1, 1, Date.now() - requestStartTime);
+        return fetchResult.data as T;
+      }
+
+      // Check if this was a cold-start transient condition (502, 503, 504, or network drop / timeout)
+      const isTransient =
+        [502, 503, 504].includes(fetchResult.status) ||
+        fetchResult.status === 0 ||
+        (transientError && (transientError as Error).name === 'AbortError');
+
+      // If it's a GET/HEAD request and transient, trigger the bounded wake coordinator!
+      if (isGetOrHead && isTransient) {
+        this.notify('waking', 'Waking Sandbox Backend…', 1, 10, Date.now() - requestStartTime);
+        const woke = await this.wakeBackend(options.signal);
+
+        if (options.signal?.aborted) {
+          throw new SoapApiError({
+            code: 'request_aborted',
+            status: 499,
+            message: 'Request was cancelled.',
+          });
+        }
+
+        if (woke) {
+          // Service is now awake and verified healthy! Execute the intended request once.
+          const retryController = new AbortController();
+          const retryTimeout = setTimeout(() => retryController.abort(), 15000);
+          const onRetryAbort = () => retryController.abort();
+          if (options.signal) {
+            options.signal.addEventListener('abort', onRetryAbort);
+          }
+
+          try {
+            const retryResult = await executeFetch(retryController.signal);
+            if (retryResult.ok) {
+              this.notify('connected', 'Sandbox Online', 1, 1, Date.now() - requestStartTime);
+              return retryResult.data as T;
+            }
+            fetchResult = retryResult;
+          } catch (retryErr: unknown) {
+            transientError = retryErr;
+          } finally {
+            clearTimeout(retryTimeout);
+            if (options.signal) {
+              options.signal.removeEventListener('abort', onRetryAbort);
+            }
+          }
+        }
+      }
+
+      // If we reach here and it was not successful:
+      // Check for domain error response (e.g. 400, 401, 409, 422, etc.)
+      if (fetchResult.status >= 400 && fetchResult.status < 500) {
+        // Domain errors mean the backend IS connected and functional!
+        this.notify('connected', 'Sandbox Online', 1, 1, Date.now() - requestStartTime);
+        const errorObj =
+          typeof fetchResult.data === 'object' && fetchResult.data !== null && 'error' in fetchResult.data
+            ? (fetchResult.data as { error: { code?: string; message?: string } }).error
+            : null;
+        const code = errorObj?.code || `http_${fetchResult.status}`;
+        const message = errorObj?.message || (typeof fetchResult.data === 'string' ? fetchResult.data : `HTTP ${fetchResult.status} error`);
+        throw new SoapApiError(this.mapDomainError(code, message, fetchResult.status));
+      }
+
+      // If server returned a 5xx error or recovery failed
+      this.notify('unavailable', 'Backend Unavailable', 1, 1, Date.now() - requestStartTime);
+
+      if (transientError && (transientError as Error).name === 'AbortError' && !options.signal?.aborted) {
+        throw new SoapApiError({
+          code: 'request_timeout',
+          status: 504,
+          message: 'The request to the SOAP Payments backend timed out.',
+          resolution: 'The free-tier Render service was waking from cold start and exceeded the recovery window. Click "Retry Connection" to try again.',
+        });
+      }
+
+      const isProd = typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
+      const targetHint = this.baseUrl || 'the API server';
+
       throw new SoapApiError({
-        code: 'request_timeout',
-        status: 504,
-        message: 'The request to the SOAP Payments backend timed out after 45 seconds.',
-        resolution: 'The free-tier Render service was booting from cold start. Click "Retry Connection" to reconnect.',
+        code: 'backend_unavailable',
+        status: fetchResult.status || 503,
+        message: isProd
+          ? `Unable to connect to SOAP Payments backend at ${targetHint}. The service may still be waking up or offline.`
+          : 'Unable to connect to SOAP Payments backend API. Please ensure the local Ruby API server is running on port 4567.',
+        resolution: isProd
+          ? 'The free-tier Render service was booting or unreachable. Click "Retry Connection" to reconnect.'
+          : 'Run: bundle exec puma -p 4567 config.ru',
       });
+    } finally {
+      this.inFlightRequestsCount--;
+      if (wakingTimer) clearTimeout(wakingTimer);
     }
-
-    const isProd = typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1';
-    const targetHint = this.baseUrl || 'the API server';
-
-    throw new SoapApiError({
-      code: 'connection_refused',
-      status: 503,
-      message: isProd
-        ? `Unable to connect to SOAP Payments backend at ${targetHint}. The service may still be waking up or offline.`
-        : 'Unable to connect to SOAP Payments backend API. Please ensure the local Ruby API server is running on port 4567.',
-      resolution: isProd
-        ? 'Verify your Render API service is active, then click Retry.'
-        : 'Run: bundle exec puma -p 4567 config.ru',
-    });
   }
 
-  async getHealth() {
-    return this.request<{ status: string; environment: string; database: string; timestamp: string }>('/api/health');
+  async getHealth(options?: RequestInit) {
+    return this.request<{ status: string; environment: string; database: string; timestamp: string }>('/api/health', options);
   }
 
-  async getDashboard(range?: string) {
+  async getDashboard(range?: string, options?: RequestInit) {
     const query = range ? `?range=${encodeURIComponent(range)}` : '';
-    return this.request<DashboardMetrics>(`/api/dashboard${query}`);
+    return this.request<DashboardMetrics>(`/api/dashboard${query}`, options);
   }
 
-  async getUsers(params: { q?: string; page?: number; page_size?: number } = {}) {
+  async getUsers(params: { q?: string; page?: number; page_size?: number } = {}, options?: RequestInit) {
     const searchParams = new URLSearchParams();
     if (params.q) searchParams.set('q', params.q);
     if (params.page) searchParams.set('page', params.page.toString());
     if (params.page_size) searchParams.set('page_size', params.page_size.toString());
     const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
-    return this.request<{ users: User[]; pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/users${query}`);
+    return this.request<{ users: User[]; pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/users${query}`, options);
   }
 
-  async getUser(id: number | string) {
+  async getUser(id: number | string, options?: RequestInit) {
     return this.request<{
       user: User;
       payment_methods: PaymentMethod[];
@@ -351,14 +487,14 @@ class ApiClient {
         reconciled: boolean;
         entries_count: number;
       };
-    }>(`/api/users/${id}`);
+    }>(`/api/users/${id}`, options);
   }
 
-  async getPaymentMethods() {
-    return this.request<{ payment_methods: PaymentMethod[] }>('/api/payment-methods');
+  async getPaymentMethods(options?: RequestInit) {
+    return this.request<{ payment_methods: PaymentMethod[] }>('/api/payment-methods', options);
   }
 
-  async getWithdrawals(params: { status?: string; user_id?: number; page?: number; page_size?: number; q?: string } = {}) {
+  async getWithdrawals(params: { status?: string; user_id?: number; page?: number; page_size?: number; q?: string } = {}, options?: RequestInit) {
     const searchParams = new URLSearchParams();
     if (params.status) searchParams.set('status', params.status);
     if (params.user_id) searchParams.set('user_id', params.user_id.toString());
@@ -371,46 +507,49 @@ class ApiClient {
       total: number;
       pagination?: import('@/types').PaginationMeta;
       returned_count?: number;
-    }>(`/api/withdrawals${query}`);
+    }>(`/api/withdrawals${query}`, options);
   }
 
-  async getWithdrawal(id: number | string) {
-    return this.request<{ withdrawal: Withdrawal }>(`/api/withdrawals/${id}`);
+  async getWithdrawal(id: number | string, options?: RequestInit) {
+    return this.request<{ withdrawal: Withdrawal }>(`/api/withdrawals/${id}`, options);
   }
 
-  async createWithdrawal(data: CreateWithdrawalRequest) {
+  async createWithdrawal(data: CreateWithdrawalRequest, options?: RequestInit) {
     return this.request<CreateWithdrawalResponse>('/api/withdrawals', {
+      ...options,
       method: 'POST',
       body: JSON.stringify(data),
     });
   }
 
-  async getLedger(params: { page?: number; page_size?: number } = {}) {
+  async getLedger(params: { page?: number; page_size?: number } = {}, options?: RequestInit) {
     const searchParams = new URLSearchParams();
     if (params.page) searchParams.set('page', params.page.toString());
     if (params.page_size) searchParams.set('page_size', params.page_size.toString());
     const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
-    return this.request<LedgerViewResponse & { pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/ledger${query}`);
+    return this.request<LedgerViewResponse & { pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/ledger${query}`, options);
   }
 
-  async getWebhooks(params: { page?: number; page_size?: number } = {}) {
+  async getWebhooks(params: { page?: number; page_size?: number } = {}, options?: RequestInit) {
     const searchParams = new URLSearchParams();
     if (params.page) searchParams.set('page', params.page.toString());
     if (params.page_size) searchParams.set('page_size', params.page_size.toString());
     const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
-    return this.request<{ webhooks: WebhookEventRecord[]; pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/webhooks${query}`);
+    return this.request<{ webhooks: WebhookEventRecord[]; pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/webhooks${query}`, options);
   }
 
-  async postWebhook(event: Record<string, unknown>) {
+  async postWebhook(event: Record<string, unknown>, options?: RequestInit) {
     return this.request<{ status: string; message: string }>('/api/webhooks', {
+      ...options,
       method: 'POST',
       body: JSON.stringify(event),
     });
   }
 
-  async getAuditLogs() {
+  async getAuditLogs(options?: RequestInit) {
     return this.request<{ audit_logs: AuditLogEvent[]; activity_logs?: AuditLogEvent[]; environment: string }>(
-      '/api/audit-logs'
+      '/api/audit-logs',
+      options
     );
   }
 }

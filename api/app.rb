@@ -78,7 +78,7 @@ class SoapPaymentsApi < Sinatra::Base
 
   use Rack::Cors do
     allow do
-      origins(*configured_origins)
+      origins(*configured_origins, %r{\Ahttps://soap-payments[a-z0-9-]*\.vercel\.app\z})
       resource '*',
                headers: :any,
                methods: %i[get post put patch delete options head],

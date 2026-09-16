@@ -249,6 +249,9 @@ The core implementation is thoroughly validated by a **59-example RSpec test sui
 4. Set environment variable:
    - `ALLOWED_ORIGINS`: Your Vercel frontend URL (e.g. `https://soap-payments.vercel.app`).
 
+### Infrastructure & Cold-Start Notice
+Render Free web services may spin down after inactivity and require a cold start. The frontend therefore exposes an explicit waking state and bounded recovery flow. Eliminating cold-start latency entirely requires an always-on paid compute instance on Render.
+
 ---
 
 ## Sandbox Disclaimer & Compliance Statement
