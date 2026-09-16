@@ -14,35 +14,25 @@ An enterprise-grade payments orchestration platform and operations console built
 | **Domain Engine** | Ruby 3.3 / ActiveRecord | In-process | Core Orchestration & Financial Invariants |
 | **Database** | PostgreSQL | `localhost:5432` / `5433` | Append-Only Financial Ledger & Relational Models |
 
-```mermaid
-graph LR
-    subgraph Frontend[Frontend Console]
-        UI[Next.js Operations Dashboard]
-        SIM[Withdrawal Routing Simulator]
-    end
-
-    subgraph API[Backend API Layer]
-        Sinatra[Sinatra REST API]
-    end
-
-    subgraph Core[Core Payment Engine]
-        WS[WithdrawalService]
-        CLR[ClosedLoopResolver]
-        PD[PayoutDispatcher]
-        WH[WithdrawalWebhookHandler]
-    end
-
-    subgraph Storage[PostgreSQL Storage]
-        DB[(PostgreSQL Database)]
-    end
-
-    UI --> Sinatra
-    SIM --> Sinatra
-    Sinatra --> WS
-    WS --> CLR
-    WS --> PD
-    WS --> DB
-    WH --> DB
+```text
+[Next.js Operations Console]
+              |
+              v
+       [Sinatra REST API]
+              |
+              v
+      [WithdrawalService]
+          /    |     \
+         /     |      \
+        v      v       v
+[ClosedLoop] [Payout] [PostgreSQL]
+[Resolver]   [Dispatcher]
+                    |
+                    v
+             [WebhookHandler]
+                    |
+                    v
+              [PostgreSQL]
 ```
 
 ---
