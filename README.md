@@ -1,6 +1,6 @@
 # SOAP Payments — Closed-Loop Withdrawal Router
 
-An enterprise-grade payments orchestration platform and operations console built with **Next.js 16 (App Router)**, **Ruby/Sinatra**, and **PostgreSQL**. Features deterministic Anti-Money Laundering (AML) closed-loop routing, pessimistic concurrency control, database-backed idempotency, an append-only double-entry ledger, and a real-time visual Withdrawal Routing Simulator.
+An enterprise-grade payments orchestration platform and operations console built with **Next.js 16 (App Router)**, **Ruby/Sinatra**, and **PostgreSQL**. Features deterministic closed-loop payment routing controls (modeling AML-aware instrument reversal policies), pessimistic concurrency control, database-backed idempotency, an append-only double-entry ledger, and a real-time visual Withdrawal Routing Simulator.
 
 ---
 
@@ -15,44 +15,34 @@ An enterprise-grade payments orchestration platform and operations console built
 | **Database** | PostgreSQL | `localhost:5432` / `5433` | Append-Only Financial Ledger & Relational Models |
 
 ```mermaid
-flowchart LR
-    subgraph Client ["Frontend Console (Vercel)"]
-        UI["Next.js Operations Dashboard"]
-        Sim["Withdrawal Routing Simulator"]
+graph LR
+    subgraph Frontend[Frontend Console]
+        UI[Next.js Operations Dashboard]
+        SIM[Withdrawal Routing Simulator]
     end
 
-    subgraph API ["Backend API Layer (Render)"]
-        Sinatra["Sinatra REST Controller"]
-        CORS["Rack::Cors & Error Handlers"]
+    subgraph API[Backend API Layer]
+        Sinatra[Sinatra REST API]
     end
 
-    subgraph Core ["Authoritative Payment Engine"]
-        WS["WithdrawalService"]
-        CLR["ClosedLoopResolver"]
-        PD["PayoutDispatcher"]
-        WWH["WithdrawalWebhookHandler"]
+    subgraph Core[Core Payment Engine]
+        WS[WithdrawalService]
+        CLR[ClosedLoopResolver]
+        PD[PayoutDispatcher]
+        WH[WithdrawalWebhookHandler]
     end
 
-    subgraph DB ["PostgreSQL Database"]
-        Ledger[("ledger_entries (Append-Only)")]
-        Users[("users (Row Locks)")]
-        Deps[("deposits (Unrefunded Principal)")]
-        Withdrawals[("withdrawals & payout_legs")]
-        Idem[("idempotency_keys")]
+    subgraph Storage[PostgreSQL Storage]
+        DB[(PostgreSQL Database)]
     end
 
     UI --> Sinatra
-    Sim --> Sinatra
+    SIM --> Sinatra
     Sinatra --> WS
     WS --> CLR
     WS --> PD
-    WS --> Users
-    WS --> Deps
-    WS --> Withdrawals
-    WS --> Ledger
-    WS --> Idem
-    WWH --> Withdrawals
-    WWH --> Ledger
+    WS --> DB
+    WH --> DB
 ```
 
 ---
@@ -122,18 +112,18 @@ All endpoints return standard JSON envelopes. Error responses follow a uniform s
 | Method | Endpoint | Description | Status Codes |
 | :--- | :--- | :--- | :---: |
 | `GET` | `/api/health` | Service health and database connection status | `200` |
-| `GET` | `/api/dashboard` | Aggregated KPIs, 7-day trends, outcome distribution | `200` |
+| `GET` | `/api/dashboard` | Aggregated KPIs, dynamic date range trends (`7d`, `30d`, `month`), outcome distribution | `200` |
 | `GET` | `/api/users` | List of customers, balances, and instrument counts | `200` |
 | `GET` | `/api/users/:id` | Customer profile, deposits, and ledger summary | `200`, `404` |
 | `GET` | `/api/payment-methods` | Masked payment instruments list | `200` |
-| `GET` | `/api/withdrawals` | Filterable withdrawals list | `200` |
-| `GET` | `/api/withdrawals/:id` | Withdrawal details, payout legs, and event timeline | `200`, `404` |
+| `GET` | `/api/withdrawals` | Filterable withdrawals list with server-side search | `200` |
+| `GET` | `/api/withdrawals/:id` | Withdrawal details, payout legs, event timeline, and correlated webhooks | `200`, `404` |
 | `GET` | `/api/withdrawals/:id/ledger` | Related ledger audit trail entries for withdrawal | `200`, `404` |
-| `GET` | `/api/withdrawals/:id/webhooks` | Related provider webhook events for withdrawal legs | `200`, `404` |
-| `POST` | `/api/withdrawals` | Orchestrates a withdrawal via `WithdrawalService` | `201`, `400`, `403`, `409`, `422` |
-| `GET` | `/api/ledger` | Immutable financial ledger and reconciliation status | `200` |
+| `GET` | `/api/withdrawals/:id/webhooks` | Related provider webhook events via indexed relational foreign key | `200`, `404` |
+| `POST` | `/api/withdrawals` | Orchestrates a withdrawal via `WithdrawalService` with row locking | `201`, `400`, `403`, `409`, `422` |
+| `GET` | `/api/ledger` | Immutable financial ledger and mathematical reconciliation status | `200` |
 | `GET` | `/api/webhooks` | Webhook delivery history and replay-safety state | `200` |
-| `POST` | `/api/webhooks` | Ingests and processes provider callbacks | `200` |
+| `POST` | `/api/webhooks` | Ingests and processes provider callbacks with HMAC signature verification | `200`, `400`, `401`, `413`, `500` |
 | `GET` | `/api/audit-logs` | Operational activity trail | `200` |
 
 ---
@@ -157,7 +147,7 @@ bundle exec rake db:migrate
 # Seed deterministic sandbox data
 bundle exec rake db:seed
 
-# Run the complete test suite (25 domain specs + 8 API specs)
+# Run the complete test suite (59 RSpec examples: 27 domain + 32 API specs)
 bundle exec rspec
 
 # Start the Puma API server on port 4567
@@ -185,7 +175,7 @@ Open [http://localhost:3000](http://localhost:3000) in your browser to view the 
 
 ## Automated Acceptance Matrix
 
-The core implementation is thoroughly validated by a **47-example RSpec test suite** covering domain invariants, pessimistic concurrency, API contracts, security controls, pagination, and search:
+The core implementation is thoroughly validated by a **59-example RSpec test suite (0 failures)** covering domain invariants, pessimistic concurrency, multi-threaded idempotent replay, API contracts, security controls, pagination, and search:
 
 | Scenario / Spec | Invariant Tested | Status |
 | :--- | :--- | :---: |
@@ -198,6 +188,8 @@ The core implementation is thoroughly validated by a **47-example RSpec test sui
 | **R7** | Idempotent replay returns cached result with zero duplicate financial side effects | PASS |
 | **R8** | Idempotency conflict on parameter mismatch returns 409 error | PASS |
 | **R9** | Multithreaded concurrency: parallel threads cannot overdraft balance | PASS |
+| **R9b** | Concurrent identical requests resolve to single withdrawal and single debit | PASS |
+| **R9c** | Concurrent conflicting requests return one 201 and one 409 with zero balance corruption | PASS |
 | **R10** | Provider `:submitted` updates state without ledger reversal | PASS |
 | **R11** | Provider `:failed` executes exactly-once reversal restoring balance | PASS |
 | **R12** | Provider `:unknown` leaves leg non-terminal with no reversal and no retry | PASS |
@@ -206,7 +198,7 @@ The core implementation is thoroughly validated by a **47-example RSpec test sui
 | **R15** | Mathematical reconciliation between balance and ledger deltas | PASS |
 | **R16** | Strict ledger immutability blocking update and delete | PASS |
 | **API 1–2** | `/api/health` returns healthy status, DB check, and environment metadata | PASS |
-| **API 3** | `/api/dashboard` derives consistent metrics from database | PASS |
+| **API 3** | `/api/dashboard` derives consistent metrics and dynamic range filtering (`7d`, `30d`, `month`) | PASS |
 | **API 4** | `POST /api/withdrawals` executes multi-leg closed-loop allocation | PASS |
 | **API 5** | `POST /api/withdrawals` returns 409 on idempotency conflict | PASS |
 | **API 6** | `POST /api/withdrawals` returns 422 on insufficient balance | PASS |
@@ -215,9 +207,15 @@ The core implementation is thoroughly validated by a **47-example RSpec test sui
 | **API 9** | `POST /api/webhooks` handles asynchronous callbacks safely | PASS |
 | **API 10–12** | Real pagination support (`page`, `page_size`, `total_count`, `returned_count`) | PASS |
 | **API 13–15** | Server-side search (`?q=`) filtering withdrawals, users, and webhooks | PASS |
-| **API 16–17** | Webhook payload size enforcement (max 64KB, HTTP 413) | PASS |
-| **API 18–20** | Webhook HMAC-SHA256 signature verification and replay window (300s) | PASS |
-| **API 21–22** | Host authorization enforcement blocking unauthorized Host headers with 403 | PASS |
+| **API 16** | Webhook payload size enforcement (max 64KB, HTTP 413) | PASS |
+| **API 17–19** | Strict Verified Mode: rejects unsigned (401), missing timestamp (401), malformed timestamp (401) | PASS |
+| **API 20–21** | Webhook replay window (300s, 401) and missing secret configuration error (500) | PASS |
+| **API 22** | Webhook HMAC-SHA256 constant-time verification with valid canonical input | PASS |
+| **API 23** | Explicit Sandbox Mode (`SOAP_WEBHOOK_SANDBOX=true`) accepting unsigned callbacks | PASS |
+| **API 24** | Duplicate external webhook event handled idempotently | PASS |
+| **API 25** | Unknown provider external ID fails safely without crash | PASS |
+| **API 26** | Relational indexed webhook correlation linking payout legs to withdrawals | PASS |
+| **API 27–28** | Host authorization enforcement blocking unauthorized Host headers with 403 | PASS |
 
 ---
 
@@ -225,10 +223,11 @@ The core implementation is thoroughly validated by a **47-example RSpec test sui
 
 - **Sandbox Authentication Boundary:** The API operates in an explicitly documented sandbox demonstration mode. No deceptive client-side JWT tokens or simulated fake logins are used. Sensitive endpoints and simulation controls are clearly labeled as sandbox-only.
 - **Webhook Ingestion Security:**
-  - **HMAC-SHA256 Verification:** Inbound provider webhooks verify signatures via constant-time comparison (`Rack::Utils.secure_compare`).
-  - **Replay Protection:** Rejects payloads timestamped older than 300 seconds.
+  - **Strict Verified Mode (Default):** Inbound webhooks require valid HMAC-SHA256 signatures and integer epoch timestamps. Verified via constant-time comparison (`Rack::Utils.secure_compare`). Missing signatures or expired timestamps ($> 300$ seconds) return `401 Unauthorized`. Missing `WEBHOOK_SIGNING_SECRET` returns `500 Internal Server Error` (no silent demo fallback).
+  - **Explicit Sandbox Mode:** Unsigned callbacks are accepted only when `SOAP_WEBHOOK_SANDBOX=true` is explicitly configured, returning header `X-Webhook-Auth: sandbox-unverified`.
+  - **Relational Webhook Correlation:** Webhook events link to payout legs via indexed `payout_leg_id` and indexed `external_id` foreign keys (no Ruby full-table scans, no JSON string matching).
   - **Payload Size Limits:** Inbound requests larger than 64KB are rejected immediately with `413 Payload Too Large`.
-  - **Deduplication:** Guaranteed idempotent handling keyed on `external_event_id`.
+  - **Deduplication:** Guaranteed idempotent handling keyed on unique `external_event_id`.
 - **Host Authorization & CORS:**
   - Strict host filtering permitting only designated deployment domains (`.render.com`, `.onrender.com`, `localhost`, `127.0.0.1`).
   - Exact origin validation via `ALLOWED_ORIGINS` environment variable.
@@ -244,11 +243,11 @@ The core implementation is thoroughly validated by a **47-example RSpec test sui
 ## Deployment Guide
 
 ### Vercel (Frontend)
-1. Push the repository to GitHub.
-2. In Vercel, import the repository and set **Root Directory** to `frontend`.
-3. Configure the environment variable:
+1. In Vercel, import the repository and set **Root Directory** to `frontend`.
+2. Configure the environment variables:
    - `NEXT_PUBLIC_API_BASE_URL`: The URL of your deployed Render API (e.g. `https://soap-payments-api.onrender.com`).
-4. Deploy.
+   - `NEXT_PUBLIC_SITE_URL`: The canonical URL of your deployed Vercel frontend (e.g. `https://soap-payments.vercel.app`).
+3. Deploy.
 
 ### Render (Ruby API & PostgreSQL)
 1. In Render, create a new **Web Service** connected to the repository.

@@ -74,7 +74,7 @@ class SoapPaymentsApi < Sinatra::Base
                        elsif is_dev
                          ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:3001']
                        else
-                         ['https://soap-payments-closed-loop-withdrawal-router.vercel.app']
+                         ['https://soap-payments.vercel.app']
                        end
 
   use Rack::Cors do

@@ -25,7 +25,10 @@ const GithubIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' })
   </svg>
 );
 
+const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || 'https://soap-payments.vercel.app').replace(/\/$/, '');
+
 export const metadata = {
+  metadataBase: new URL(siteUrl),
   title: 'SOAP Payments | Closed-Loop Withdrawal Router & Fintech Engine',
   description:
     'Enterprise-grade closed-loop payments orchestration platform. Enforces FIFO refund routing, pessimistic concurrency control, append-only double-entry ledgering, and webhook reconciliation.',
@@ -33,7 +36,7 @@ export const metadata = {
     title: 'SOAP Payments — Closed-Loop Withdrawal Router',
     description:
       'Enterprise fintech operations platform: FIFO closed-loop refund routing, pessimistic row locking, and immutable append-only ledger.',
-    url: 'https://soap-payments-closed-loop-withdrawal-router.vercel.app',
+    url: siteUrl,
     siteName: 'SOAP Payments',
     locale: 'en_US',
     type: 'website',
