@@ -72,4 +72,50 @@ RSpec.describe ClosedLoopResolver do
       resolver.resolve(user: user, amount_cents: 1000, default_payout_method_id: -999)
     }.to raise_error(ClosedLoopResolver::PayoutNotFoundError)
   end
+
+  describe 'same-asset closed-loop routing and cross-asset refusal' do
+    it 'allocates only from matching asset deposits and ignores conflicting asset deposits' do
+      user = create_user
+      fiat_pm = create_pm(user: user, asset_class: 'fiat_card')
+      crypto_pm = create_pm(user: user, asset_class: 'crypto')
+      default_fiat_pm = create_pm(user: user, asset_class: 'fiat_ach')
+
+      create_dep(user: user, pm: fiat_pm, amount_cents: 6000, unrefunded_cents: 6000, settled_at: 2.hours.ago)
+      create_dep(user: user, pm: crypto_pm, amount_cents: 6000, unrefunded_cents: 6000, settled_at: 1.hour.ago)
+
+      # 6000 withdrawal against fiat payout method: only fiat deposit contributes; crypto contributes 0
+      plan = resolver.resolve(user: user, amount_cents: 6000, default_payout_method_id: default_fiat_pm.id)
+      expect(plan.size).to eq(1)
+      expect(plan.first.payment_method_id).to eq(fiat_pm.id)
+      expect(plan.first.amount_cents).to eq(6000)
+      expect(plan.none? { |e| e.payment_method_id == crypto_pm.id }).to be(true)
+    end
+
+    it 'refuses withdrawal when amount exceeds eligible deposits and conflicting asset deposits exist' do
+      user = create_user
+      fiat_pm = create_pm(user: user, asset_class: 'fiat_card')
+      crypto_pm = create_pm(user: user, asset_class: 'crypto')
+      default_fiat_pm = create_pm(user: user, asset_class: 'fiat_ach')
+
+      create_dep(user: user, pm: fiat_pm, amount_cents: 6000, unrefunded_cents: 6000, settled_at: 2.hours.ago)
+      create_dep(user: user, pm: crypto_pm, amount_cents: 6000, unrefunded_cents: 6000, settled_at: 1.hour.ago)
+
+      # 10000 withdrawal requires 4000 excess, but conflicting crypto deposits exist -> CrossAssetError
+      expect {
+        resolver.resolve(user: user, amount_cents: 10_000, default_payout_method_id: default_fiat_pm.id)
+      }.to raise_error(ClosedLoopResolver::CrossAssetError, /crossing asset families/)
+    end
+
+    it 'refuses withdrawal when only conflicting asset deposits exist for the payout method' do
+      user = create_user
+      crypto_pm = create_pm(user: user, asset_class: 'crypto')
+      default_fiat_pm = create_pm(user: user, asset_class: 'fiat_ach')
+
+      create_dep(user: user, pm: crypto_pm, amount_cents: 10_000, unrefunded_cents: 10_000, settled_at: 1.hour.ago)
+
+      expect {
+        resolver.resolve(user: user, amount_cents: 10_000, default_payout_method_id: default_fiat_pm.id)
+      }.to raise_error(ClosedLoopResolver::CrossAssetError)
+    end
+  end
 end

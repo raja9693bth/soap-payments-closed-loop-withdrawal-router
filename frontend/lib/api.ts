@@ -1,5 +1,4 @@
-// Centralized API Client for SOAP Payments Operations Dashboard
-import {
+import type {
   DashboardMetrics,
   User,
   PaymentMethod,
@@ -10,6 +9,7 @@ import {
   AuditLogEvent,
   CreateWithdrawalRequest,
   CreateWithdrawalResponse,
+  PaginationMeta,
 } from '@/types';
 
 export interface ApiErrorDetail {
@@ -76,7 +76,7 @@ export interface ConnectionStateEvent {
 
 type StateListener = (event: ConnectionStateEvent) => void;
 
-class ApiClient {
+export class ApiClient {
   private baseUrl: string;
   private listeners: Set<StateListener> = new Set();
   private currentState: BackendConnectionState = 'connecting';
@@ -129,7 +129,7 @@ class ApiClient {
    * Multiple concurrent callers share the EXACT same in-flight probe promise (no request storm).
    * Automatically stops immediately when connected or when the recovery window (~70s) expires.
    */
-  async wakeBackend(signal?: AbortSignal | null): Promise<boolean> {
+  async wakeBackend(): Promise<boolean> {
     if (this.inFlightWakePromise) {
       return this.inFlightWakePromise;
     }
@@ -149,21 +149,12 @@ class ApiClient {
       this.notify('waking', 'Waking Sandbox Backend…', 1, 10, 0);
 
       while (Date.now() - wakeStartTime < maxRecoveryWindowMs) {
-        if (signal?.aborted) {
-          return false;
-        }
-
         attempt++;
         const elapsed = Date.now() - wakeStartTime;
         this.notify('waking', 'Waking Sandbox Backend…', attempt, 10, elapsed);
 
         const probeController = new AbortController();
         const probeTimeout = setTimeout(() => probeController.abort(), probeTimeoutMs);
-
-        const onParentAbort = () => probeController.abort();
-        if (signal) {
-          signal.addEventListener('abort', onParentAbort);
-        }
 
         try {
           const resp = await fetch(healthUrl, {
@@ -174,9 +165,6 @@ class ApiClient {
           });
 
           clearTimeout(probeTimeout);
-          if (signal) {
-            signal.removeEventListener('abort', onParentAbort);
-          }
 
           if (resp.ok) {
             const data = await resp.json().catch(() => null);
@@ -187,12 +175,6 @@ class ApiClient {
           }
         } catch {
           clearTimeout(probeTimeout);
-          if (signal) {
-            signal.removeEventListener('abort', onParentAbort);
-          }
-          if (signal?.aborted) {
-            return false;
-          }
         }
 
         // Bounded sleep with progressive backoff (3s to 5s)
@@ -373,9 +355,40 @@ class ApiClient {
         (transientError && (transientError as Error).name === 'AbortError');
 
       // If it's a GET/HEAD request and transient, trigger the bounded wake coordinator!
-      if (isGetOrHead && isTransient) {
+      if (isGetOrHead && isTransient && !options.signal?.aborted) {
         this.notify('waking', 'Waking Sandbox Backend…', 1, 10, Date.now() - requestStartTime);
-        const woke = await this.wakeBackend(options.signal);
+
+        let cleanupAbortListener: (() => void) | undefined;
+        const wakeWaitPromise = this.wakeBackend();
+
+        const abortWaitPromise = new Promise<boolean>((_, reject) => {
+          if (options.signal) {
+            if (options.signal.aborted) {
+              reject(new SoapApiError({
+                code: 'request_aborted',
+                status: 499,
+                message: 'Request was cancelled.',
+              }));
+              return;
+            }
+            const onAbort = () => {
+              reject(new SoapApiError({
+                code: 'request_aborted',
+                status: 499,
+                message: 'Request was cancelled.',
+              }));
+            };
+            options.signal.addEventListener('abort', onAbort, { once: true });
+            cleanupAbortListener = () => options.signal?.removeEventListener('abort', onAbort);
+          }
+        });
+
+        let woke = false;
+        try {
+          woke = options.signal ? await Promise.race([wakeWaitPromise, abortWaitPromise]) : await wakeWaitPromise;
+        } finally {
+          cleanupAbortListener?.();
+        }
 
         if (options.signal?.aborted) {
           throw new SoapApiError({
@@ -472,7 +485,7 @@ class ApiClient {
     if (params.page) searchParams.set('page', params.page.toString());
     if (params.page_size) searchParams.set('page_size', params.page_size.toString());
     const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
-    return this.request<{ users: User[]; pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/users${query}`, options);
+    return this.request<{ users: User[]; pagination?: PaginationMeta; returned_count?: number }>(`/api/users${query}`, options);
   }
 
   async getUser(id: number | string, options?: RequestInit) {
@@ -505,7 +518,7 @@ class ApiClient {
     return this.request<{
       withdrawals: Withdrawal[];
       total: number;
-      pagination?: import('@/types').PaginationMeta;
+      pagination?: PaginationMeta;
       returned_count?: number;
     }>(`/api/withdrawals${query}`, options);
   }
@@ -527,7 +540,7 @@ class ApiClient {
     if (params.page) searchParams.set('page', params.page.toString());
     if (params.page_size) searchParams.set('page_size', params.page_size.toString());
     const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
-    return this.request<LedgerViewResponse & { pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/ledger${query}`, options);
+    return this.request<LedgerViewResponse & { pagination?: PaginationMeta; returned_count?: number }>(`/api/ledger${query}`, options);
   }
 
   async getWebhooks(params: { page?: number; page_size?: number } = {}, options?: RequestInit) {
@@ -535,7 +548,7 @@ class ApiClient {
     if (params.page) searchParams.set('page', params.page.toString());
     if (params.page_size) searchParams.set('page_size', params.page_size.toString());
     const query = searchParams.toString() ? `?${searchParams.toString()}` : '';
-    return this.request<{ webhooks: WebhookEventRecord[]; pagination?: import('@/types').PaginationMeta; returned_count?: number }>(`/api/webhooks${query}`, options);
+    return this.request<{ webhooks: WebhookEventRecord[]; pagination?: PaginationMeta; returned_count?: number }>(`/api/webhooks${query}`, options);
   }
 
   async postWebhook(event: Record<string, unknown>, options?: RequestInit) {
