@@ -12,7 +12,7 @@ require 'erb'
 require 'pg'
 
 # 1. Resolve DB config — honor DATABASE_URL first, then config/database.yml
-db_url = ENV['DATABASE_URL']
+db_url = ENV.fetch('DATABASE_URL', nil)
 if db_url && !db_url.empty?
   ActiveRecord::Base.establish_connection(db_url)
 else

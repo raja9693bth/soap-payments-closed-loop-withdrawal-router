@@ -29,7 +29,7 @@ class SoapPaymentsApi < Sinatra::Base
   def self.ensure_database_connection!
     return if ActiveRecord::Base.connected?
 
-    db_url = ENV['DATABASE_URL']
+    db_url = ENV.fetch('DATABASE_URL', nil)
     if db_url && !db_url.empty?
       ActiveRecord::Base.establish_connection(db_url)
     else
@@ -56,18 +56,17 @@ class SoapPaymentsApi < Sinatra::Base
       /\.render\.com\z/,
       /\.onrender\.com\z/
     ]
-    if ENV['RENDER_EXTERNAL_HOSTNAME'].present?
-      permitted_hosts << ENV['RENDER_EXTERNAL_HOSTNAME']
-    end
-    if ENV['HOST_AUTHORIZATION_ALLOWED_HOSTS'].present?
-      permitted_hosts.concat(ENV['HOST_AUTHORIZATION_ALLOWED_HOSTS'].split(',').map(&:strip))
-    end
+    render_hostname = ENV.fetch('RENDER_EXTERNAL_HOSTNAME', nil)
+    permitted_hosts << render_hostname if render_hostname.present?
+
+    allowed_hosts = ENV.fetch('HOST_AUTHORIZATION_ALLOWED_HOSTS', nil)
+    permitted_hosts.concat(allowed_hosts.split(',').map(&:strip)) if allowed_hosts.present?
     set :host_authorization, { permitted_hosts: permitted_hosts }
   end
 
   # 2. CORS configuration with explicit origin validation
   is_dev = ENV.fetch('RACK_ENV', 'development') == 'development' || ENV.fetch('RACK_ENV', 'development') == 'test'
-  allowed_origins_env = ENV['ALLOWED_ORIGINS']
+  allowed_origins_env = ENV.fetch('ALLOWED_ORIGINS', nil)
 
   configured_origins = if allowed_origins_env.present?
                          allowed_origins_env.split(',').map(&:strip)
@@ -146,7 +145,7 @@ class SoapPaymentsApi < Sinatra::Base
         halt 413, { error: { code: 'payload_too_large', message: 'Webhook payload exceeds 64KB limit' } }.to_json
       end
 
-      sandbox_mode = (ENV['SOAP_WEBHOOK_SANDBOX'] == 'true')
+      sandbox_mode = (ENV.fetch('SOAP_WEBHOOK_SANDBOX', nil) == 'true')
       signature = request.env['HTTP_X_WEBHOOK_SIGNATURE'] || request.env['HTTP_SOAP_SIGNATURE']
       timestamp = request.env['HTTP_X_WEBHOOK_TIMESTAMP']
 
@@ -174,7 +173,7 @@ class SoapPaymentsApi < Sinatra::Base
         halt 401, { error: { code: 'webhook_timestamp_expired', message: 'Webhook timestamp outside valid replay window (+/- 5 minutes)' } }.to_json
       end
 
-      secret = ENV['WEBHOOK_SIGNING_SECRET']
+      secret = ENV.fetch('WEBHOOK_SIGNING_SECRET', nil)
       if secret.blank?
         halt 500, { error: { code: 'webhook_configuration_error', message: 'WEBHOOK_SIGNING_SECRET is not configured' } }.to_json
       end
