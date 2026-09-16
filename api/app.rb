@@ -146,31 +146,43 @@ class SoapPaymentsApi < Sinatra::Base
         halt 413, { error: { code: 'payload_too_large', message: 'Webhook payload exceeds 64KB limit' } }.to_json
       end
 
+      sandbox_mode = (ENV['SOAP_WEBHOOK_SANDBOX'] == 'true')
       signature = request.env['HTTP_X_WEBHOOK_SIGNATURE'] || request.env['HTTP_SOAP_SIGNATURE']
       timestamp = request.env['HTTP_X_WEBHOOK_TIMESTAMP']
 
-      # In sandbox mode, if signature header is absent, allow it but mark as sandbox-unverified
+      # Unsigned mode is only allowed if SOAP_WEBHOOK_SANDBOX=true is explicitly set
       if signature.blank?
-        headers 'X-Webhook-Auth' => 'sandbox-unverified'
-        return
-      end
-
-      # 2. Timestamp freshness check (replay protection within 300s)
-      if timestamp.present?
-        req_time = timestamp.to_i
-        if (Time.current.to_i - req_time).abs > 300
-          halt 401, { error: { code: 'webhook_timestamp_expired', message: 'Webhook timestamp outside valid replay window (+/- 5 minutes)' } }.to_json
+        if sandbox_mode
+          headers 'X-Webhook-Auth' => 'sandbox-unverified'
+          return
+        else
+          halt 401, { error: { code: 'missing_webhook_signature', message: 'Webhook signature is required in verified mode' } }.to_json
         end
       end
 
-      # 3. Constant-time signature verification
-      secret = ENV.fetch('WEBHOOK_SIGNING_SECRET', 'whsec_sandbox_demo_key_untrusted')
-      expected_sig_with_ts = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{raw_body}")
-      expected_sig_raw = OpenSSL::HMAC.hexdigest('SHA256', secret, raw_body)
+      # In verified mode (or when a signature is provided), timestamp is required and must be valid
+      if timestamp.blank?
+        halt 401, { error: { code: 'missing_webhook_timestamp', message: 'Webhook timestamp is required for signed requests' } }.to_json
+      end
 
-      valid = Rack::Utils.secure_compare(signature, expected_sig_with_ts) ||
-              Rack::Utils.secure_compare(signature, expected_sig_raw)
+      unless timestamp.to_s =~ /\A\d+\z/
+        halt 401, { error: { code: 'malformed_webhook_timestamp', message: 'Webhook timestamp must be an integer epoch timestamp' } }.to_json
+      end
 
+      req_time = timestamp.to_i
+      if (Time.current.to_i - req_time).abs > 300
+        halt 401, { error: { code: 'webhook_timestamp_expired', message: 'Webhook timestamp outside valid replay window (+/- 5 minutes)' } }.to_json
+      end
+
+      secret = ENV['WEBHOOK_SIGNING_SECRET']
+      if secret.blank?
+        halt 500, { error: { code: 'webhook_configuration_error', message: 'WEBHOOK_SIGNING_SECRET is not configured' } }.to_json
+      end
+
+      # Canonical signing input: "#{timestamp}.#{raw_body}"
+      expected_sig = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{raw_body}")
+
+      valid = Rack::Utils.secure_compare(signature, expected_sig)
       unless valid
         halt 401, { error: { code: 'invalid_webhook_signature', message: 'HMAC signature verification failed' } }.to_json
       end
@@ -331,9 +343,19 @@ class SoapPaymentsApi < Sinatra::Base
     ledger_entries_total = LedgerEntry.sum(:amount_cents) || 0
     ledger_balanced = (user_balances_total == ledger_entries_total)
 
-    # 5. 7-day trend series via single SQL group query
-    seven_days_ago = 6.days.ago.beginning_of_day
-    daily_stats = Withdrawal.where('created_at >= ?', seven_days_ago)
+    # 5. Trend series via single SQL group query respecting range parameter
+    range = (params[:range] || params[:days] || '7d').to_s.downcase
+    start_time, num_days = case range
+                           when '30d'
+                             [29.days.ago.beginning_of_day, 30]
+                           when 'month'
+                             start_date = Date.current.beginning_of_month
+                             [start_date.beginning_of_day, (Date.current - start_date).to_i + 1]
+                           else # '7d'
+                             [6.days.ago.beginning_of_day, 7]
+                           end
+
+    daily_stats = Withdrawal.where('created_at >= ?', start_time)
                             .group("DATE(created_at)", :state)
                             .pluck(Arel.sql("DATE(created_at)::text"), :state, Arel.sql("COUNT(*)"), Arel.sql("COALESCE(SUM(amount_cents), 0)"))
 
@@ -353,7 +375,7 @@ class SoapPaymentsApi < Sinatra::Base
     end
 
     today = Date.current
-    trends_7d = (0..6).to_a.reverse.map do |days_ago|
+    trends_series = (0...num_days).to_a.reverse.map do |days_ago|
       day = today - days_ago.days
       day_key = day.to_s
       metrics = stats_by_date[day_key]
@@ -393,7 +415,9 @@ class SoapPaymentsApi < Sinatra::Base
         ledger_balanced: ledger_balanced,
         active_users_count: User.count
       },
-      trends_7d: trends_7d,
+      trends_7d: trends_series,
+      trends: trends_series,
+      range: range,
       outcome_distribution: outcome_distribution,
       system_status: {
         router: 'healthy',
@@ -519,12 +543,10 @@ class SoapPaymentsApi < Sinatra::Base
       }
     end
 
-    # Related webhook events via indexed SQL LIKE query rather than Ruby full-table scan
-    ext_ids = legs.map { |l| l[:external_id] }.compact
-    webhooks = if ext_ids.any?
-                 conditions = ext_ids.map { 'payload LIKE ?' }.join(' OR ')
-                 values = ext_ids.map { |eid| "%#{eid}%" }
-                 WebhookEvent.where(conditions, *values).order(created_at: :desc).limit(20).map do |we|
+    # Related webhook events via indexed relational query on payout_leg_id
+    leg_ids = legs.map { |l| l[:id] }.compact
+    webhooks = if leg_ids.any?
+                 WebhookEvent.where(payout_leg_id: leg_ids).order(created_at: :desc).limit(20).map do |we|
                    {
                      id: we.id,
                      external_event_id: we.external_event_id,
@@ -610,11 +632,9 @@ class SoapPaymentsApi < Sinatra::Base
 
   get '/api/withdrawals/:id/webhooks' do
     w = Withdrawal.includes(:payout_legs).find(params[:id])
-    ext_ids = w.payout_legs.map(&:external_id).compact
-    events = if ext_ids.any?
-               conditions = ext_ids.map { 'payload LIKE ?' }.join(' OR ')
-               values = ext_ids.map { |eid| "%#{eid}%" }
-               WebhookEvent.where(conditions, *values).order(created_at: :desc).limit(20).map do |we|
+    leg_ids = w.payout_legs.map(&:id)
+    events = if leg_ids.any?
+               WebhookEvent.where(payout_leg_id: leg_ids).order(created_at: :desc).limit(20).map do |we|
                  {
                    id: we.id,
                    external_event_id: we.external_event_id,
@@ -791,7 +811,12 @@ class SoapPaymentsApi < Sinatra::Base
     handler.handle(body)
 
     status 200
-    { status: 'received', message: 'Webhook event processed safely' }.to_json
+    auth_mode = response['X-Webhook-Auth'] || 'unknown'
+    {
+      status: 'received',
+      message: 'Webhook event processed safely',
+      auth_mode: auth_mode
+    }.to_json
   end
 
   # Activity Log / Derived Operations

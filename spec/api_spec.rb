@@ -40,6 +40,21 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
       expect(json['kpis']['active_users_count']).to eq(1)
       expect(json['kpis']['ledger_balanced']).to be true
       expect(json['system_status']['router']).to eq('healthy')
+      expect(json['trends_7d'].size).to eq(7)
+    end
+
+    it 'respects dynamic range parameter (30d, month)' do
+      get '/api/dashboard?range=30d'
+      expect(last_response.status).to eq(200)
+      json = JSON.parse(last_response.body)
+      expect(json['trends'].size).to eq(30)
+      expect(json['range']).to eq('30d')
+
+      get '/api/dashboard?range=month'
+      expect(last_response.status).to eq(200)
+      json_m = JSON.parse(last_response.body)
+      expect(json_m['range']).to eq('month')
+      expect(json_m['trends'].size).to be >= 1
     end
   end
 
@@ -207,6 +222,14 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
   end
 
   describe 'POST /api/webhooks' do
+    around(:each) do |example|
+      orig_sandbox = ENV['SOAP_WEBHOOK_SANDBOX']
+      ENV['SOAP_WEBHOOK_SANDBOX'] = 'true'
+      example.run
+    ensure
+      ENV['SOAP_WEBHOOK_SANDBOX'] = orig_sandbox
+    end
+
     it 'ingests webhook events and updates payout leg safely' do
       user = User.create!(email: 'webhook_user@soapdemo.com', balance_cents: 5_000)
       pm = PaymentMethod.create!(user: user, asset_class: 'fiat_ach', external_token: 'bank_wh')
@@ -252,7 +275,7 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
       w = Withdrawal.create!(user: user, amount_cents: 2_000, state: 'submitted', idempotency_key: 'idem_subres', request_fingerprint: 'fp_subres')
       leg = PayoutLeg.create!(withdrawal: w, payment_method: pm, amount_cents: 2_000, state: 'submitted', external_id: 'ext_subres_1')
       LedgerEntry.create!(user: user, entry_type: 'withdrawal_debit', amount_cents: -2_000, reference: "withdrawal:#{w.id}", created_at: Time.current)
-      WebhookEvent.create!(external_event_id: 'evt_subres_1', event_type: 'payout.submitted', payload: { external_id: 'ext_subres_1' }.to_json, processed_at: Time.current)
+      WebhookEvent.create!(external_event_id: 'evt_subres_1', event_type: 'payout.submitted', payload: { external_id: 'ext_subres_1' }.to_json, processed_at: Time.current, payout_leg: leg)
 
       get "/api/withdrawals/#{w.id}/ledger"
       expect(last_response.status).to eq(200)
@@ -354,9 +377,20 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
     end
   end
 
-  describe 'Webhook Security & Verification' do
-    let(:secret) { 'whsec_sandbox_demo_key_untrusted' }
+  describe 'Webhook Security, Authentication Modes & Correlation' do
+    let(:secret) { 'test_webhook_signing_secret_123456789' }
     let(:payload) { { event_id: 'evt_sec_1', event_type: 'payout.settled', data: { external_id: 'leg_sec_1', status: 'settled' } }.to_json }
+
+    around(:each) do |example|
+      orig_secret = ENV['WEBHOOK_SIGNING_SECRET']
+      orig_sandbox = ENV['SOAP_WEBHOOK_SANDBOX']
+      ENV['WEBHOOK_SIGNING_SECRET'] = secret
+      ENV['SOAP_WEBHOOK_SANDBOX'] = nil
+      example.run
+    ensure
+      ENV['WEBHOOK_SIGNING_SECRET'] = orig_secret
+      ENV['SOAP_WEBHOOK_SANDBOX'] = orig_sandbox
+    end
 
     it 'rejects payload exceeding 64KB with 413 Payload Too Large' do
       huge_body = { data: 'x' * 70_000 }.to_json
@@ -366,19 +400,44 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
       expect(json['error']['code']).to eq('payload_too_large')
     end
 
-    it 'rejects invalid HMAC signature with 401 Unauthorized when signature is provided' do
-      timestamp = Time.current.to_i.to_s
+    it 'rejects unsigned webhook when sandbox mode is disabled (verified mode default)' do
+      post '/api/webhooks', payload, { 'CONTENT_TYPE' => 'application/json' }
+      expect(last_response.status).to eq(401)
+      json = JSON.parse(last_response.body)
+      expect(json['error']['code']).to eq('missing_webhook_signature')
+    end
+
+    it 'accepts unsigned webhook when SOAP_WEBHOOK_SANDBOX=true is explicitly configured' do
+      ENV['SOAP_WEBHOOK_SANDBOX'] = 'true'
+      post '/api/webhooks', payload, { 'CONTENT_TYPE' => 'application/json' }
+      expect(last_response.status).to eq(200)
+      expect(last_response.headers['X-Webhook-Auth']).to eq('sandbox-unverified')
+      json = JSON.parse(last_response.body)
+      expect(json['auth_mode']).to eq('sandbox-unverified')
+    end
+
+    it 'rejects signed webhook when timestamp is missing' do
       post '/api/webhooks', payload, {
         'CONTENT_TYPE' => 'application/json',
-        'HTTP_X_WEBHOOK_SIGNATURE' => 'bad_signature_hex',
-        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+        'HTTP_X_WEBHOOK_SIGNATURE' => 'some_sig'
       }
       expect(last_response.status).to eq(401)
       json = JSON.parse(last_response.body)
-      expect(json['error']['code']).to eq('invalid_webhook_signature')
+      expect(json['error']['code']).to eq('missing_webhook_timestamp')
     end
 
-    it 'rejects expired timestamp (+/- 5 minutes) with 401 Unauthorized' do
+    it 'rejects malformed non-integer timestamp' do
+      post '/api/webhooks', payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => 'some_sig',
+        'HTTP_X_WEBHOOK_TIMESTAMP' => 'not_a_valid_integer_ts'
+      }
+      expect(last_response.status).to eq(401)
+      json = JSON.parse(last_response.body)
+      expect(json['error']['code']).to eq('malformed_webhook_timestamp')
+    end
+
+    it 'rejects expired/stale timestamp outside 5-minute replay window' do
       timestamp = (Time.current.to_i - 600).to_s
       signature = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{payload}")
       post '/api/webhooks', payload, {
@@ -391,7 +450,32 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
       expect(json['error']['code']).to eq('webhook_timestamp_expired')
     end
 
-    it 'accepts verified HMAC signature with valid timestamp' do
+    it 'returns 500 when WEBHOOK_SIGNING_SECRET is missing in verified mode' do
+      ENV['WEBHOOK_SIGNING_SECRET'] = nil
+      timestamp = Time.current.to_i.to_s
+      post '/api/webhooks', payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => 'some_sig',
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(500)
+      json = JSON.parse(last_response.body)
+      expect(json['error']['code']).to eq('webhook_configuration_error')
+    end
+
+    it 'rejects invalid HMAC signature with 401 Unauthorized' do
+      timestamp = Time.current.to_i.to_s
+      post '/api/webhooks', payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => 'bad_hex_signature',
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(401)
+      json = JSON.parse(last_response.body)
+      expect(json['error']['code']).to eq('invalid_webhook_signature')
+    end
+
+    it 'accepts verified HMAC signature with valid timestamp and canonical signing input' do
       timestamp = Time.current.to_i.to_s
       signature = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{payload}")
       post '/api/webhooks', payload, {
@@ -401,6 +485,72 @@ RSpec.describe 'SoapPaymentsApi HTTP Endpoints', type: :request do
       }
       expect(last_response.status).to eq(200)
       expect(last_response.headers['X-Webhook-Auth']).to eq('hmac-verified')
+      json = JSON.parse(last_response.body)
+      expect(json['auth_mode']).to eq('hmac-verified')
+    end
+
+    it 'handles duplicate external webhook event idempotently' do
+      timestamp = Time.current.to_i.to_s
+      signature = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{payload}")
+      post '/api/webhooks', payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => signature,
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(200)
+
+      # Re-send same external webhook event
+      post '/api/webhooks', payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => signature,
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(200)
+    end
+
+    it 'safely handles unknown provider external_id without crashing' do
+      unknown_payload = { event_id: 'evt_unk_99', event_type: 'payout.failed', payload: { external_id: 'leg_nonexistent_xyz', status: 'failed' } }.to_json
+      timestamp = Time.current.to_i.to_s
+      signature = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{unknown_payload}")
+      post '/api/webhooks', unknown_payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => signature,
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(200)
+    end
+
+    it 'correlates webhook event to payout leg and withdrawal via indexed relational query' do
+      user = User.create!(email: 'relational@soapdemo.com', balance_cents: 5000)
+      pm = PaymentMethod.create!(user: user, asset_class: 'fiat_ach', external_token: 'bank_corr')
+      withdrawal = Withdrawal.create!(user: user, amount_cents: 5000, state: 'processing', idempotency_key: 'rel_test_key', request_fingerprint: Digest::SHA256.hexdigest('rel_test_key'))
+      leg = PayoutLeg.create!(withdrawal: withdrawal, payment_method: pm, amount_cents: 5000, state: 'submitted', external_id: 'ext_leg_rel_123')
+
+      rel_payload = { event_id: 'evt_rel_123', event_type: 'payout.settled', payload: { external_id: 'ext_leg_rel_123', status: 'settled' } }.to_json
+      timestamp = Time.current.to_i.to_s
+      signature = OpenSSL::HMAC.hexdigest('SHA256', secret, "#{timestamp}.#{rel_payload}")
+
+      post '/api/webhooks', rel_payload, {
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_WEBHOOK_SIGNATURE' => signature,
+        'HTTP_X_WEBHOOK_TIMESTAMP' => timestamp
+      }
+      expect(last_response.status).to eq(200)
+
+      # Verify payout leg transition
+      leg.reload
+      expect(leg.state).to eq('settled')
+
+      # Verify WebhookEvent foreign key was set
+      we = WebhookEvent.find_by(external_event_id: 'evt_rel_123')
+      expect(we.payout_leg_id).to eq(leg.id)
+
+      # Verify withdrawal detail and webhooks endpoints use relational link
+      get "/api/withdrawals/#{withdrawal.id}/webhooks"
+      expect(last_response.status).to eq(200)
+      res_json = JSON.parse(last_response.body)
+      expect(res_json['webhook_events'].size).to eq(1)
+      expect(res_json['webhook_events'].first['external_event_id']).to eq('evt_rel_123')
     end
   end
 

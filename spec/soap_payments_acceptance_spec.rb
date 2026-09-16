@@ -281,6 +281,61 @@ RSpec.describe "SOAP Payments Acceptance Suite (R1-R16)" do
     expect(results.count { |r| r.status == :error && r.code == :insufficient_funds }).to eq(1)
   end
 
+  it 'R9b: guarantees single execution and identical replay on concurrent requests with identical idempotency key' do
+    user = create_user(balance_cents: 10_000)
+    pm = create_payment_method(user: user, asset_class: 'fiat_card')
+    same_key = "r9b_same_key_#{SecureRandom.hex(4)}"
+    body = { amount: 3000 }
+
+    results = []
+    threads = 2.times.map do
+      Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          results << service.execute(
+            user: user,
+            amount_cents: 3_000,
+            default_payout_method_id: pm.id,
+            idempotency_key: same_key,
+            request_body: body
+          )
+        end
+      end
+    end
+    threads.each(&:join)
+
+    expect(results.map(&:status)).to eq([:ok, :ok])
+    expect(results.map(&:withdrawal_id).uniq.size).to eq(1)
+    expect(Withdrawal.where(idempotency_key: same_key).count).to eq(1)
+    expect(user.reload.balance_cents).to eq(7_000)
+    expect(LedgerEntry.where(user: user, entry_type: 'withdrawal_debit').count).to eq(1)
+  end
+
+  it 'R9c: returns 409 conflict under concurrent requests with identical key but different payloads' do
+    user = create_user(balance_cents: 10_000)
+    pm = create_payment_method(user: user, asset_class: 'fiat_card')
+    same_key = "r9c_conflict_key_#{SecureRandom.hex(4)}"
+
+    results = []
+    threads = [3000, 4000].map do |amt|
+      Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          results << service.execute(
+            user: user,
+            amount_cents: amt,
+            default_payout_method_id: pm.id,
+            idempotency_key: same_key,
+            request_body: { amount: amt }
+          )
+        end
+      end
+    end
+    threads.each(&:join)
+
+    expect(results.count { |r| r.status == :ok }).to eq(1)
+    expect(results.count { |r| r.status == :error && r.code == :idempotency_conflict }).to eq(1)
+    expect(Withdrawal.where(idempotency_key: same_key).count).to eq(1)
+  end
+
   # ==========================================
   # R10: Provider submitted outcome
   # ==========================================

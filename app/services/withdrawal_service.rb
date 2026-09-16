@@ -65,9 +65,28 @@ class WithdrawalService
     legs = []
     error_result = nil
 
+    is_concurrent_replay = false
+
     ActiveRecord::Base.transaction do
       # Pessimistic lock on balance owner
       locked_user = User.lock("FOR UPDATE").find(user.id)
+
+      # Concurrency safeguard: check if this idempotency key was claimed while waiting for the user lock
+      existing_w = Withdrawal.find_by(idempotency_key: idempotency_key)
+      if existing_w
+        if existing_w.request_fingerprint != fingerprint
+          error_result = Result.new(
+            status: :error,
+            code: :idempotency_conflict,
+            message: "Idempotency key already used with different request parameters"
+          )
+        else
+          withdrawal = existing_w
+          legs = existing_w.payout_legs.to_a
+          is_concurrent_replay = true
+        end
+        raise ActiveRecord::Rollback
+      end
 
       if locked_user.balance_cents < amount_cents
         error_result = Result.new(status: :error, code: :insufficient_funds, message: "Insufficient funds")
@@ -134,6 +153,18 @@ class WithdrawalService
     end
 
     return error_result if error_result
+
+    # If the withdrawal was claimed by a concurrent thread with the same key and body,
+    # return the identical result without duplicate dispatch
+    if is_concurrent_replay
+      return Result.new(
+        status: :ok,
+        withdrawal_id: withdrawal.id,
+        legs: legs,
+        code: nil,
+        message: nil
+      )
+    end
 
     # 5. Dispatch legs outside of database transaction lock
     dispatcher = PayoutDispatcher.new(payout_provider: @payout_provider)

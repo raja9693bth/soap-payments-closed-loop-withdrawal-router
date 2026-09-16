@@ -325,8 +325,9 @@ class ApiClient {
     return this.request<{ status: string; environment: string; database: string; timestamp: string }>('/api/health');
   }
 
-  async getDashboard() {
-    return this.request<DashboardMetrics>('/api/dashboard');
+  async getDashboard(range?: string) {
+    const query = range ? `?range=${encodeURIComponent(range)}` : '';
+    return this.request<DashboardMetrics>(`/api/dashboard${query}`);
   }
 
   async getUsers(params: { q?: string; page?: number; page_size?: number } = {}) {

@@ -37,9 +37,9 @@ export default function OverviewPage() {
     });
   }, []);
 
-  const fetchMetrics = useCallback(async () => {
+  const fetchMetrics = useCallback(async (selectedRange: string = dateRange) => {
     try {
-      const data = await api.getDashboard();
+      const data = await api.getDashboard(selectedRange);
       setMetrics(data);
       setError(null);
     } catch (err: unknown) {
@@ -51,17 +51,17 @@ export default function OverviewPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [dateRange]);
 
   const handleRefresh = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetchMetrics();
-  }, [fetchMetrics]);
+    fetchMetrics(dateRange);
+  }, [fetchMetrics, dateRange]);
 
   useEffect(() => {
-    fetchMetrics();
-  }, [fetchMetrics]);
+    fetchMetrics(dateRange);
+  }, [dateRange, fetchMetrics]);
 
   // Derive authoritative ledger balance states
   const getLedgerCardProps = () => {
@@ -126,12 +126,17 @@ export default function OverviewPage() {
               <Calendar className="w-4 h-4 text-slate-400" />
               <select
                 value={dateRange}
-                onChange={(e) => setDateRange(e.target.value)}
+                onChange={(e) => {
+                  const newRange = e.target.value;
+                  setDateRange(newRange);
+                  setLoading(true);
+                  fetchMetrics(newRange);
+                }}
                 className="bg-transparent border-none outline-none font-medium text-slate-700 text-xs cursor-pointer pr-4 appearance-none"
               >
-                <option value="7d">Last 7 Days (Sep 8 — Sep 14)</option>
+                <option value="7d">Last 7 Days</option>
                 <option value="30d">Last 30 Days</option>
-                <option value="month">Current Month (Sep 2026)</option>
+                <option value="month">Current Month</option>
               </select>
               <ChevronDown className="w-3.5 h-3.5 text-slate-400 -ml-3 pointer-events-none" />
             </div>

@@ -24,7 +24,7 @@ class WithdrawalWebhookHandler
 
     apply_transition!(leg, incoming_status, failure_code)
 
-    webhook_record&.update!(processed_at: Time.current)
+    webhook_record&.update!(processed_at: Time.current, payout_leg_id: leg.id)
   end
 
   private
